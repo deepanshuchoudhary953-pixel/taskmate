@@ -176,6 +176,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [library, setLibrary] = useState<LibraryNote[]>([]);
   const [activityLog, setActivityLog] = useState<ActivityItem[]>([]);
 
+  // Moved above the useEffects below: `logout` is referenced inside the
+  // auth-state-change effect (both directly and in its dependency array),
+  // so it must be declared before those effects run to avoid a
+  // temporal-dead-zone ReferenceError / "used before its declaration".
+  const logout = async () => {
+    try {
+      await supabase.auth.signOut();
+    } catch {
+      // ignore supabase sign-out errors
+    }
+    setCurrentUser(null);
+    setStudents([]);
+    setNotes([]);
+    setResults([]);
+    setAnnouncements([]);
+    setConversations([]);
+    setNotifications([]);
+    setLibrary([]);
+    setActivityLog([]);
+  };
+
   const loadTeacherConversations = useCallback(async (teacherId: string) => {
     const { data: conversationRows, error: conversationError } = await supabase
       .from('conversations')
@@ -390,7 +411,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 };
                 setCurrentUser(fallbackUser);
                 try {
-                  await loadStudentData();
+                  await loadStudentData(fallbackUser);
                 } catch (e) {
                   // ignore
                 }
@@ -432,7 +453,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       else if (anyListener?.subscription?.unsubscribe) anyListener.subscription.unsubscribe();
       else if (typeof anyListener === 'function') anyListener();
     };
-  }, [logout, loadStudentData]);
+  }, [logout, loadStudentData, loadTeacherData]);
 
   const login = async (username: string, password: string, role: Role) => {
     try {
@@ -461,23 +482,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch (err) {
       return { success: false, error: (err as Error).message };
     }
-  };
-
-  const logout = async () => {
-    try {
-      await supabase.auth.signOut();
-    } catch {
-      // ignore supabase sign-out errors
-    }
-    setCurrentUser(null);
-    setStudents([]);
-    setNotes([]);
-    setResults([]);
-    setAnnouncements([]);
-    setConversations([]);
-    setNotifications([]);
-    setLibrary([]);
-    setActivityLog([]);
   };
 
   const registerTeacher = async (name: string, username: string, password: string) => {

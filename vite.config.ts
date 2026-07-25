@@ -15,15 +15,26 @@ export default defineConfig({
       manifest: {
         name: "TaskMate – Student Portal",
         short_name: "TaskMate",
-        description: "Manage notes, results, announcements and messages for your tuition class.",
+        description:
+          "Manage notes, results, announcements and messages for your tuition class.",
         theme_color: "#10b981",
         background_color: "#0f172a",
         display: "standalone",
         orientation: "any",
         start_url: "/",
         icons: [
-          { src: "/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any maskable" },
-          { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any maskable" },
+          {
+            src: "/icon-192.png",
+            sizes: "192x192",
+            type: "image/png",
+            purpose: "any maskable",
+          },
+          {
+            src: "/icon-512.png",
+            sizes: "512x512",
+            type: "image/png",
+            purpose: "any maskable",
+          },
         ],
       },
       workbox: {
@@ -31,13 +42,16 @@ export default defineConfig({
         cleanupOutdatedCaches: true,
         skipWaiting: true,
         clientsClaim: true,
+        maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
       },
       devOptions: { enabled: false },
     }),
   ],
 
   resolve: {
-    alias: { "@": path.resolve(__dirname, "src") },
+    alias: {
+      "@": path.resolve(__dirname, "src"),
+    },
   },
 
   server: {
@@ -53,5 +67,6 @@ export default defineConfig({
 
   build: {
     outDir: "dist",
+    minify: false,
   },
 });
