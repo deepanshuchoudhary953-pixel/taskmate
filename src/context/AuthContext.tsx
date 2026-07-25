@@ -81,6 +81,32 @@ const createId = () => typeof crypto !== 'undefined' ? crypto.randomUUID() : `${
 const now = () => new Date().toISOString();
 const buildStoragePath = (filename: string) => `${Date.now()}-${Math.random().toString(36).slice(2)}-${filename}`;
 
+const buildAppUserFromProfile = (
+  supUser: { id: string; email?: string | null; user_metadata?: Record<string, unknown> } | null | undefined,
+  profile: Record<string, unknown> | null | undefined,
+  fallbackRole: Role = 'student',
+): User => {
+  const metadata = (supUser?.user_metadata ?? {}) as Record<string, unknown>;
+  const displayName = (profile?.full_name as string)
+    ?? (profile?.name as string)
+    ?? (metadata.full_name as string)
+    ?? (metadata.name as string)
+    ?? (supUser?.email ?? 'Supabase User');
+
+  return {
+    id: (profile?.user_id as string) ?? (profile?.id as string) ?? supUser?.id ?? '',
+    name: displayName,
+    username: (profile?.username as string) ?? ((metadata.username as string) ?? (supUser?.email ?? supUser?.id ?? '')),
+    role: (profile?.role as Role) ?? ((metadata.role as Role) ?? fallbackRole),
+    class: (profile?.class as string) ?? undefined,
+    rollNumber: (profile?.roll_number as string) ?? undefined,
+    guardianName: (profile?.guardian_name as string) ?? undefined,
+    guardianPhone: (profile?.guardian_phone as string) ?? undefined,
+    teacherId: (profile?.teacher_id as string) ?? undefined,
+    photoUrl: (profile?.photo_url as string) ?? undefined,
+  };
+};
+
 const uploadFileToStorage = async (file: File) => {
   const storagePath = buildStoragePath(file.name);
   const { error } = await supabase.storage.from(STORAGE_BUCKET).upload(storagePath, file);
@@ -343,30 +369,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // Lookup profile and populate currentUser (same mapping as onAuthStateChange)
         try {
           const supUser = session.user;
-          const { data: profile, error: profileError } = await supabase
+          let profile: Record<string, unknown> | null = null;
+          const { data: userProfile, error: profileError } = await supabase
             .from('profiles')
             .select('*')
             .eq('user_id', supUser.id)
-            .single();
+            .maybeSingle();
 
-          if (profileError) {
-            setCurrentUser(null);
-            setLoading(false);
-            return;
+          if (!profileError && userProfile) {
+            profile = userProfile;
+          } else if (supUser.email) {
+            const { data: emailProfile, error: emailProfileError } = await supabase
+              .from('profiles')
+              .select('*')
+              .eq('email', supUser.email)
+              .maybeSingle();
+
+            if (!emailProfileError && emailProfile) {
+              profile = emailProfile;
+            }
           }
 
-          const builtUser: User = {
-            id: (profile.user_id as string) ?? (profile.id as string) ?? supUser.id,
-            name: (profile.full_name as string) ?? (profile.name as string) ?? (supUser.email ?? 'Supabase User'),
-            username: (profile.username as string) ?? (supUser.email ?? supUser.id),
-            role: (profile.role as Role) ?? ((supUser.user_metadata && (supUser.user_metadata.role as Role)) ?? 'student'),
-            class: (profile.class as string) ?? undefined,
-            rollNumber: (profile.roll_number as string) ?? undefined,
-            guardianName: (profile.guardian_name as string) ?? undefined,
-            guardianPhone: (profile.guardian_phone as string) ?? undefined,
-            teacherId: (profile.teacher_id as string) ?? undefined,
-            photoUrl: (profile.photo_url as string) ?? undefined,
-          };
+          const builtUser = buildAppUserFromProfile(supUser, profile, 'student');
 
           setCurrentUser(builtUser);
           if (builtUser.role === 'teacher') await loadTeacherData(builtUser.id);
@@ -395,42 +419,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           const supUser = session?.user;
           if (supUser) {
             try {
-              const { data: profile, error } = await supabase
+              let profile: Record<string, unknown> | null = null;
+              const { data: userProfile, error } = await supabase
                 .from('profiles')
                 .select('*')
                 .eq('user_id', supUser.id)
-                .single();
+                .maybeSingle();
 
-              if (error) {
-                // If profile lookup fails, fall back to a minimal mapping (no hardcoded role)
-                const fallbackUser: User = {
-                  id: supUser.id,
-                  name: (supUser.user_metadata && (supUser.user_metadata.full_name || supUser.user_metadata.name)) ?? (supUser.email ?? 'Supabase User'),
-                  username: supUser.email ?? supUser.id,
-                  role: (supUser.user_metadata && (supUser.user_metadata.role as Role)) ?? 'student',
-                };
-                setCurrentUser(fallbackUser);
-                try {
-                  await loadStudentData(fallbackUser);
-                } catch (e) {
-                  // ignore
+              if (!error && userProfile) {
+                profile = userProfile;
+              } else if (supUser.email) {
+                const { data: emailProfile, error: emailProfileError } = await supabase
+                  .from('profiles')
+                  .select('*')
+                  .eq('email', supUser.email)
+                  .maybeSingle();
+
+                if (!emailProfileError && emailProfile) {
+                  profile = emailProfile;
                 }
-                return;
               }
 
-              // Build app `User` from profile row using existing app field names
-              const builtUser: User = {
-                id: (profile.user_id as string) ?? (profile.id as string) ?? supUser.id,
-                name: (profile.full_name as string) ?? (profile.name as string) ?? (supUser.email ?? 'Supabase User'),
-                username: (profile.username as string) ?? (supUser.email ?? supUser.id),
-                role: (profile.role as Role) ?? ((supUser.user_metadata && (supUser.user_metadata.role as Role)) ?? 'student'),
-                class: (profile.class as string) ?? undefined,
-                rollNumber: (profile.roll_number as string) ?? undefined,
-                guardianName: (profile.guardian_name as string) ?? undefined,
-                guardianPhone: (profile.guardian_phone as string) ?? undefined,
-                teacherId: (profile.teacher_id as string) ?? undefined,
-                photoUrl: (profile.photo_url as string) ?? undefined,
-              };
+              const builtUser = buildAppUserFromProfile(supUser, profile, 'student');
 
               setCurrentUser(builtUser);
 
@@ -460,9 +470,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const normalizedUsername = username.trim().toLowerCase();
       const { data: profile, error: profileError } = await supabase
         .from('profiles')
-        .select('email, role')
+        .select('*')
         .eq('username', normalizedUsername)
-        .single();
+        .maybeSingle();
 
       if (profileError || !profile) {
         return { success: false, error: 'Incorrect username or password.' };
@@ -472,12 +482,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return { success: false, error: `This account is registered as a ${profile.role}.` };
       }
 
-      const { error: signInError } = await supabase.auth.signInWithPassword({
+      const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
         email: profile.email as string,
         password,
       });
 
       if (signInError) return { success: false, error: signInError.message };
+
+      const sessionUser = signInData?.user ?? null;
+      if (sessionUser) {
+        const builtUser = buildAppUserFromProfile(sessionUser, profile, role);
+        setCurrentUser(builtUser);
+        if (builtUser.role === 'teacher') await loadTeacherData(builtUser.id);
+        else await loadStudentData(builtUser);
+      }
+
       return { success: true };
     } catch (err) {
       return { success: false, error: (err as Error).message };
@@ -490,6 +509,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
         email,
         password,
+        options: {
+          data: {
+            role: 'teacher',
+            full_name: name.trim(),
+            username: username.trim().toLowerCase(),
+          },
+        },
       });
 
       if (signUpError || !signUpData.user) {
@@ -497,25 +523,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       const supUser = signUpData.user;
-      const { error: profileError } = await supabase.from('profiles').insert({
+      const { data: profileData, error: profileError } = await supabase.from('profiles').insert({
         user_id: supUser.id,
         username: username.trim().toLowerCase(),
         full_name: name.trim(),
         email,
         role: 'teacher',
-      });
+      }).select().maybeSingle();
 
-      if (profileError) {
-        return { success: false, error: profileError.message };
+      if (profileError || !profileData) {
+        return { success: false, error: profileError?.message ?? 'Could not create teacher profile.' };
       }
 
-      const { error: signInError } = await supabase.auth.signInWithPassword({
+      const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
         email,
         password,
       });
 
       if (signInError) {
         return { success: false, error: signInError.message };
+      }
+
+      const sessionUser = signInData?.user ?? null;
+      if (sessionUser) {
+        const builtUser = buildAppUserFromProfile(sessionUser, profileData, 'teacher');
+        setCurrentUser(builtUser);
+        if (builtUser.role === 'teacher') await loadTeacherData(builtUser.id);
+        else await loadStudentData(builtUser);
       }
 
       return { success: true };
@@ -600,6 +634,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
         email,
         password,
+        options: {
+          data: {
+            role: 'student',
+            full_name: student.name.trim(),
+            username: student.username.trim().toLowerCase(),
+          },
+        },
       });
 
       if (signUpError || !signUpData.user) {
@@ -617,7 +658,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         guardian_name: student.guardianName,
         guardian_phone: student.guardianPhone,
         teacher_id: currentUser.id,
-      }).select().single();
+      }).select().maybeSingle();
 
       if (profileError || !profileData) {
         return { success: false, error: profileError?.message ?? 'Could not create student profile.' };
