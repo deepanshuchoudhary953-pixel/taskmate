@@ -396,12 +396,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [library, setLibrary] = useState<LibraryNote[]>([]);
   const [activityLog, setActivityLog] = useState<ActivityItem[]>([]);
   const localFallbackRef = useRef(useLocalFallback());
+  const suppressAuthSyncUntilRef = useRef(0);
+
+  const suppressNextAuthSync = () => {
+    suppressAuthSyncUntilRef.current = Date.now() + 2000;
+  };
 
   // Moved above the useEffects below: `logout` is referenced inside the
   // auth-state-change effect (both directly and in its dependency array),
   // so it must be declared before those effects run to avoid a
   // temporal-dead-zone ReferenceError / "used before its declaration".
   const logout = async () => {
+    suppressNextAuthSync();
     try {
       await supabase.auth.signOut();
     } catch {
@@ -705,6 +711,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const listener = supabase.auth.onAuthStateChange(async (event, session) => {
       try {
+        if (suppressAuthSyncUntilRef.current > Date.now()) {
+          return;
+        }
+
         if (event === 'SIGNED_OUT') {
           // Clear local app session/state when Supabase signs out
           await logout();
@@ -742,6 +752,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = async (username: string, password: string, role: Role) => {
     try {
+      suppressNextAuthSync();
       const normalizedUsername = normalizeUsername(username);
       const localFallbackUser = getLocalFallbackUser(username, password, role);
       if (localFallbackUser) {
@@ -846,6 +857,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       const supUser = signUpData.user;
+      suppressNextAuthSync();
       let profileData: Record<string, unknown> | null = null;
       try {
         const { data, error } = await supabase.from('profiles').insert(buildProfileWritePayload({
@@ -921,7 +933,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const resetStudentPassword = async (studentId: string, newPassword: string) => {
     if (import.meta.env.DEV) {
       try {
-        const apiUrl = import.meta.env.VITE_API_URL ?? 'http://localhost:3001';
+        const apiUrl = import.meta.env.VITE_API_URL ?? window.location.origin;
         const token = typeof window !== 'undefined' ? window.localStorage.getItem('taskmate_token') : null;
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         if (token) headers.Authorization = `Bearer ${token}`;
@@ -1001,6 +1013,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       const supUser = signUpData.user;
+      suppressNextAuthSync();
       let profileData: Record<string, unknown> | null = null;
       try {
         const { data, error } = await supabase.from('profiles').insert(buildProfileWritePayload({

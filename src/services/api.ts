@@ -19,7 +19,7 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
-export const API_BASE_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:3001';
+export const API_BASE_URL = import.meta.env.VITE_API_URL ?? '';
 
 // Token helpers — swap localStorage key to match your auth provider
 export const getToken = (): string | null => localStorage.getItem('taskmate_token');
