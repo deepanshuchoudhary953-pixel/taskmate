@@ -293,6 +293,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setNotifications([]);
     setLibrary([]);
     setActivityLog([]);
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem('taskmate_token');
+      window.localStorage.removeItem(`${LOCAL_STORAGE_PREFIX}:mode`);
+    }
   };
 
   const loadTeacherConversations = useCallback(async (teacherId: string) => {
@@ -840,6 +844,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const nextStudents = [...readLocalJson<User[]>("students", []), newStudent];
       writeLocalJson("students", nextStudents);
       setStudents((prev) => [...prev, newStudent]);
+      setCurrentUser((prev) => prev ? { ...prev } : prev);
       return { success: true };
     } catch (err) {
       return { success: false, error: (err as Error).message };
