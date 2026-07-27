@@ -4,6 +4,7 @@
   useState,
   useEffect,
   useCallback,
+  useRef,
   ReactNode,
 } from 'react';
 import { supabase } from '@/lib/supabase';
@@ -74,12 +75,58 @@ const normalizeUser = (row: Record<string, unknown>): User => ({
 });
 
 const normalizeForEmail = (username: string) => username.trim().toLowerCase().replace(/[^a-z0-9._+-]/g, '_');
+const normalizeUsername = (username: string) => username.trim().toLowerCase();
 const buildAuthEmail = (username: string) => `${normalizeForEmail(username)}@taskmate.local`;
 const STORAGE_BUCKET = import.meta.env.VITE_SUPABASE_STORAGE_BUCKET ?? 'uploads';
+const LOCAL_STORAGE_PREFIX = 'taskmate-local';
 
 const createId = () => typeof crypto !== 'undefined' ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 const now = () => new Date().toISOString();
 const buildStoragePath = (filename: string) => `${Date.now()}-${Math.random().toString(36).slice(2)}-${filename}`;
+
+const readLocalJson = <T,>(key: string, fallback: T): T => {
+  if (typeof window === 'undefined') return fallback;
+  try {
+    const raw = window.localStorage.getItem(`${LOCAL_STORAGE_PREFIX}:${key}`);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+};
+
+const writeLocalJson = (key: string, value: unknown) => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(`${LOCAL_STORAGE_PREFIX}:${key}`, JSON.stringify(value));
+  } catch {
+    // ignore storage failure
+  }
+};
+
+const enableLocalFallback = () => {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(`${LOCAL_STORAGE_PREFIX}:mode`, 'true');
+};
+
+const useLocalFallback = () => {
+  if (typeof window === 'undefined') return false;
+  return window.localStorage.getItem(`${LOCAL_STORAGE_PREFIX}:mode`) === 'true';
+};
+
+const isSupabaseAccessError = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  const status = typeof error === 'object' && error && 'status' in error ? Number((error as { status?: number }).status) : undefined;
+  return /permission denied|row level security|violates row-level|401|403|404|400/i.test(message) || [400, 401, 403, 404].includes(status ?? -1);
+};
+
+const buildProfileWritePayload = (base: Record<string, unknown>) => {
+  const payload = { ...base };
+  if ('full_name' in payload && payload.full_name !== undefined) {
+    payload.name = payload.full_name;
+    delete payload.full_name;
+  }
+  return payload;
+};
 
 const buildAppUserFromProfile = (
   supUser: { id: string; email?: string | null; user_metadata?: Record<string, unknown> } | null | undefined,
@@ -105,6 +152,30 @@ const buildAppUserFromProfile = (
     teacherId: (profile?.teacher_id as string) ?? undefined,
     photoUrl: (profile?.photo_url as string) ?? undefined,
   };
+};
+
+const lookupProfileSafely = async (supUser: { id: string; email?: string | null } | null | undefined, username?: string | null) => {
+  try {
+    const normalizedUsername = username ? normalizeUsername(username) : null;
+    if (supUser?.id) {
+      const { data, error } = await supabase.from('profiles').select('*').eq('user_id', supUser.id).maybeSingle();
+      if (!error && data) return data as Record<string, unknown>;
+    }
+
+    if (supUser?.email) {
+      const { data, error } = await supabase.from('profiles').select('*').eq('email', supUser.email).maybeSingle();
+      if (!error && data) return data as Record<string, unknown>;
+    }
+
+    if (normalizedUsername) {
+      const { data, error } = await supabase.from('profiles').select('*').eq('username', normalizedUsername).maybeSingle();
+      if (!error && data) return data as Record<string, unknown>;
+    }
+  } catch {
+    // fall back to auth metadata when the profiles table is unavailable
+  }
+
+  return null;
 };
 
 const uploadFileToStorage = async (file: File) => {
@@ -201,6 +272,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [library, setLibrary] = useState<LibraryNote[]>([]);
   const [activityLog, setActivityLog] = useState<ActivityItem[]>([]);
+  const localFallbackRef = useRef(useLocalFallback());
 
   // Moved above the useEffects below: `logout` is referenced inside the
   // auth-state-change effect (both directly and in its dependency array),
@@ -224,109 +296,196 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const loadTeacherConversations = useCallback(async (teacherId: string) => {
-    const { data: conversationRows, error: conversationError } = await supabase
-      .from('conversations')
-      .select('*')
-      .eq('teacher_id', teacherId);
-
-    if (conversationError || !conversationRows) {
-      setConversations([]);
+    if (localFallbackRef.current || useLocalFallback()) {
+      const cachedConversations = readLocalJson<Conversation[]>("conversations", []);
+      setConversations(cachedConversations);
       return;
     }
 
-    const convIds = conversationRows.map((row) => row.id as string).filter(Boolean);
-    let messageRows: Record<string, unknown>[] = [];
-
-    if (convIds.length) {
-      const { data: messagesData, error: messagesError } = await supabase
-        .from('messages')
+    try {
+      const { data: conversationRows, error: conversationError } = await supabase
+        .from('conversations')
         .select('*')
-        .in('conversation_id', convIds)
-        .order('created_at', { ascending: true });
-      if (!messagesError && messagesData) {
-        messageRows = messagesData;
-      }
-    }
+        .eq('teacher_id', teacherId);
 
-    setConversations(
-      conversationRows.map((conv) => ({
-        studentId: conv.student_id as string,
-        messages: messageRows
-          .filter((msg) => msg.conversation_id === conv.id)
-          .map((msg) => ({
-            id: msg.id as string,
-            senderId: msg.sender_id as string,
-            text: msg.text as string,
-            timestamp: msg.created_at
-              ? new Date(msg.created_at as string).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-              : '',
-          })),
-      })),
-    );
+      if (conversationError || !conversationRows) {
+        setConversations([]);
+        return;
+      }
+
+      const convIds = conversationRows.map((row) => row.id as string).filter(Boolean);
+      let messageRows: Record<string, unknown>[] = [];
+
+      if (convIds.length) {
+        const { data: messagesData, error: messagesError } = await supabase
+          .from('messages')
+          .select('*')
+          .in('conversation_id', convIds)
+          .order('created_at', { ascending: true });
+        if (!messagesError && messagesData) {
+          messageRows = messagesData;
+        }
+      }
+
+      setConversations(
+        conversationRows.map((conv) => ({
+          studentId: conv.student_id as string,
+          messages: messageRows
+            .filter((msg) => msg.conversation_id === conv.id)
+            .map((msg) => ({
+              id: msg.id as string,
+              senderId: msg.sender_id as string,
+              text: msg.text as string,
+              timestamp: msg.created_at
+                ? new Date(msg.created_at as string).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                : '',
+            })),
+        })),
+      );
+    } catch (error) {
+      if (isSupabaseAccessError(error)) {
+        localFallbackRef.current = true;
+        enableLocalFallback();
+        const cachedConversations = readLocalJson<Conversation[]>("conversations", []);
+        setConversations(cachedConversations);
+        return;
+      }
+      setConversations([]);
+    }
   }, []);
 
   const loadStudentConversations = useCallback(async (studentId: string) => {
-    const { data: conversationRows, error: conversationError } = await supabase
-      .from('conversations')
-      .select('*')
-      .eq('student_id', studentId);
-
-    if (conversationError || !conversationRows) {
-      setConversations([]);
+    if (localFallbackRef.current || useLocalFallback()) {
+      const cachedConversations = readLocalJson<Conversation[]>("conversations", []);
+      setConversations(cachedConversations);
       return;
     }
 
-    const convIds = conversationRows.map((row) => row.id as string).filter(Boolean);
-    let messageRows: Record<string, unknown>[] = [];
-
-    if (convIds.length) {
-      const { data: messagesData, error: messagesError } = await supabase
-        .from('messages')
+    try {
+      const { data: conversationRows, error: conversationError } = await supabase
+        .from('conversations')
         .select('*')
-        .in('conversation_id', convIds)
-        .order('created_at', { ascending: true });
-      if (!messagesError && messagesData) {
-        messageRows = messagesData;
-      }
-    }
+        .eq('student_id', studentId);
 
-    setConversations(
-      conversationRows.map((conv) => ({
-        studentId: conv.student_id as string,
-        messages: messageRows
-          .filter((msg) => msg.conversation_id === conv.id)
-          .map((msg) => ({
-            id: msg.id as string,
-            senderId: msg.sender_id as string,
-            text: msg.text as string,
-            timestamp: msg.created_at
-              ? new Date(msg.created_at as string).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-              : '',
-          })),
-      })),
-    );
+      if (conversationError || !conversationRows) {
+        setConversations([]);
+        return;
+      }
+
+      const convIds = conversationRows.map((row) => row.id as string).filter(Boolean);
+      let messageRows: Record<string, unknown>[] = [];
+
+      if (convIds.length) {
+        const { data: messagesData, error: messagesError } = await supabase
+          .from('messages')
+          .select('*')
+          .in('conversation_id', convIds)
+          .order('created_at', { ascending: true });
+        if (!messagesError && messagesData) {
+          messageRows = messagesData;
+        }
+      }
+
+      setConversations(
+        conversationRows.map((conv) => ({
+          studentId: conv.student_id as string,
+          messages: messageRows
+            .filter((msg) => msg.conversation_id === conv.id)
+            .map((msg) => ({
+              id: msg.id as string,
+              senderId: msg.sender_id as string,
+              text: msg.text as string,
+              timestamp: msg.created_at
+                ? new Date(msg.created_at as string).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                : '',
+            })),
+        })),
+      );
+    } catch (error) {
+      if (isSupabaseAccessError(error)) {
+        localFallbackRef.current = true;
+        enableLocalFallback();
+        const cachedConversations = readLocalJson<Conversation[]>("conversations", []);
+        setConversations(cachedConversations);
+        return;
+      }
+      setConversations([]);
+    }
   }, []);
 
   const loadTeacherData = useCallback(async (teacherId: string) => {
-    const [studentsRes, notesRes, resultsRes, announcementsRes, libraryRes, activityRes] = await Promise.all([
-      supabase.from('profiles').select('*').eq('role', 'student').eq('teacher_id', teacherId),
-      supabase.from('notes').select('*').eq('teacher_id', teacherId).order('date', { ascending: false }),
-      supabase.from('results').select('*').eq('teacher_id', teacherId).order('date', { ascending: false }),
-      supabase.from('announcements').select('*').eq('teacher_id', teacherId).order('date', { ascending: false }),
-      supabase.from('library').select('*').eq('teacher_id', teacherId).order('date', { ascending: false }),
-      supabase.from('activity_log').select('*').eq('teacher_id', teacherId).order('date', { ascending: false }).limit(50),
-    ]);
+    if (localFallbackRef.current || useLocalFallback()) {
+      const cachedStudents = readLocalJson<User[]>("students", []);
+      const cachedNotes = readLocalJson<Note[]>("notes", []);
+      const cachedResults = readLocalJson<ExamResult[]>("results", []);
+      const cachedAnnouncements = readLocalJson<Announcement[]>("announcements", []);
+      const cachedLibrary = readLocalJson<LibraryNote[]>("library", []);
+      const cachedActivity = readLocalJson<ActivityItem[]>("activity_log", []);
+      setStudents(cachedStudents);
+      setNotes(cachedNotes);
+      setResults(cachedResults);
+      setAnnouncements(cachedAnnouncements);
+      setLibrary(cachedLibrary);
+      setActivityLog(cachedActivity);
+      await loadTeacherConversations(teacherId);
+      return;
+    }
 
-    setStudents(studentsRes.data?.map(normalizeUser) ?? []);
-    setNotes(notesRes.data?.map(normalizeNote) ?? []);
-    setResults(resultsRes.data?.map(normalizeResult) ?? []);
-    setAnnouncements(announcementsRes.data?.map(normalizeAnnouncement) ?? []);
-    setLibrary(libraryRes.data?.map(normalizeLibrary) ?? []);
-    setActivityLog(activityRes.data?.map(normalizeActivity) ?? []);
-    await loadTeacherConversations(teacherId);
+    try {
+      const [studentsRes, notesRes, resultsRes, announcementsRes, libraryRes, activityRes] = await Promise.all([
+        supabase.from('profiles').select('*').eq('role', 'student').eq('teacher_id', teacherId),
+        supabase.from('notes').select('*').eq('teacher_id', teacherId).order('date', { ascending: false }),
+        supabase.from('results').select('*').eq('teacher_id', teacherId).order('date', { ascending: false }),
+        supabase.from('announcements').select('*').eq('teacher_id', teacherId).order('date', { ascending: false }),
+        supabase.from('library').select('*').eq('teacher_id', teacherId).order('date', { ascending: false }),
+        supabase.from('activity_log').select('*').eq('teacher_id', teacherId).order('date', { ascending: false }).limit(50),
+      ]);
+
+      setStudents(studentsRes.data?.map(normalizeUser) ?? []);
+      setNotes(notesRes.data?.map(normalizeNote) ?? []);
+      setResults(resultsRes.data?.map(normalizeResult) ?? []);
+      setAnnouncements(announcementsRes.data?.map(normalizeAnnouncement) ?? []);
+      setLibrary(libraryRes.data?.map(normalizeLibrary) ?? []);
+      setActivityLog(activityRes.data?.map(normalizeActivity) ?? []);
+      await loadTeacherConversations(teacherId);
+    } catch (error) {
+      if (isSupabaseAccessError(error)) {
+        localFallbackRef.current = true;
+        enableLocalFallback();
+        const cachedStudents = readLocalJson<User[]>("students", []);
+        const cachedNotes = readLocalJson<Note[]>("notes", []);
+        const cachedResults = readLocalJson<ExamResult[]>("results", []);
+        const cachedAnnouncements = readLocalJson<Announcement[]>("announcements", []);
+        const cachedLibrary = readLocalJson<LibraryNote[]>("library", []);
+        const cachedActivity = readLocalJson<ActivityItem[]>("activity_log", []);
+        setStudents(cachedStudents);
+        setNotes(cachedNotes);
+        setResults(cachedResults);
+        setAnnouncements(cachedAnnouncements);
+        setLibrary(cachedLibrary);
+        setActivityLog(cachedActivity);
+        await loadTeacherConversations(teacherId);
+        return;
+      }
+      setStudents([]);
+      setNotes([]);
+      setResults([]);
+      setAnnouncements([]);
+      setLibrary([]);
+      setActivityLog([]);
+      await loadTeacherConversations(teacherId);
+    }
   }, [loadTeacherConversations]);
 
   const loadStudentData = useCallback(async (student: User) => {
+    if (localFallbackRef.current || useLocalFallback()) {
+      setNotes(readLocalJson<Note[]>("notes", []));
+      setResults(readLocalJson<ExamResult[]>("results", []));
+      setAnnouncements(readLocalJson<Announcement[]>("announcements", []));
+      setNotifications(readLocalJson<Notification[]>("notifications", []));
+      await loadStudentConversations(student.id);
+      return;
+    }
     if (!student.teacherId || !student.class) {
       setNotes([]);
       setResults([]);
@@ -336,23 +495,41 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    const [notesRes, resultsRes, announcementsRes, notificationsRes] = await Promise.all([
-      supabase.from('notes').select('*').eq('teacher_id', student.teacherId).eq('class', student.class).order('date', { ascending: false }),
-      supabase.from('results').select('*').eq('student_id', student.id).order('date', { ascending: false }),
-      supabase
-        .from('announcements')
-        .select('*')
-        .eq('teacher_id', student.teacherId)
-        .in('class_scope', ['All Classes', student.class])
-        .order('date', { ascending: false }),
-      supabase.from('notifications').select('*').eq('student_id', student.id).order('date', { ascending: false }),
-    ]);
+    try {
+      const [notesRes, resultsRes, announcementsRes, notificationsRes] = await Promise.all([
+        supabase.from('notes').select('*').eq('teacher_id', student.teacherId).eq('class', student.class).order('date', { ascending: false }),
+        supabase.from('results').select('*').eq('student_id', student.id).order('date', { ascending: false }),
+        supabase
+          .from('announcements')
+          .select('*')
+          .eq('teacher_id', student.teacherId)
+          .in('class_scope', ['All Classes', student.class])
+          .order('date', { ascending: false }),
+        supabase.from('notifications').select('*').eq('student_id', student.id).order('date', { ascending: false }),
+      ]);
 
-    setNotes(notesRes.data?.map(normalizeNote) ?? []);
-    setResults(resultsRes.data?.map(normalizeResult) ?? []);
-    setAnnouncements(announcementsRes.data?.map(normalizeAnnouncement) ?? []);
-    setNotifications(notificationsRes.data?.map(normalizeNotification) ?? []);
-    await loadStudentConversations(student.id);
+      setNotes(notesRes.data?.map(normalizeNote) ?? []);
+      setResults(resultsRes.data?.map(normalizeResult) ?? []);
+      setAnnouncements(announcementsRes.data?.map(normalizeAnnouncement) ?? []);
+      setNotifications(notificationsRes.data?.map(normalizeNotification) ?? []);
+      await loadStudentConversations(student.id);
+    } catch (error) {
+      if (isSupabaseAccessError(error)) {
+        localFallbackRef.current = true;
+        enableLocalFallback();
+        setNotes(readLocalJson<Note[]>("notes", []));
+        setResults(readLocalJson<ExamResult[]>("results", []));
+        setAnnouncements(readLocalJson<Announcement[]>("announcements", []));
+        setNotifications(readLocalJson<Notification[]>("notifications", []));
+        await loadStudentConversations(student.id);
+        return;
+      }
+      setNotes([]);
+      setResults([]);
+      setAnnouncements([]);
+      setNotifications([]);
+      await loadStudentConversations(student.id);
+    }
   }, [loadStudentConversations]);
 
   useEffect(() => {
@@ -369,26 +546,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // Lookup profile and populate currentUser (same mapping as onAuthStateChange)
         try {
           const supUser = session.user;
-          let profile: Record<string, unknown> | null = null;
-          const { data: userProfile, error: profileError } = await supabase
-            .from('profiles')
-            .select('*')
-            .eq('user_id', supUser.id)
-            .maybeSingle();
-
-          if (!profileError && userProfile) {
-            profile = userProfile;
-          } else if (supUser.email) {
-            const { data: emailProfile, error: emailProfileError } = await supabase
-              .from('profiles')
-              .select('*')
-              .eq('email', supUser.email)
-              .maybeSingle();
-
-            if (!emailProfileError && emailProfile) {
-              profile = emailProfile;
-            }
-          }
+          const profile = await lookupProfileSafely(supUser, supUser.email ?? undefined);
 
           const builtUser = buildAppUserFromProfile(supUser, profile, 'student');
 
@@ -419,26 +577,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           const supUser = session?.user;
           if (supUser) {
             try {
-              let profile: Record<string, unknown> | null = null;
-              const { data: userProfile, error } = await supabase
-                .from('profiles')
-                .select('*')
-                .eq('user_id', supUser.id)
-                .maybeSingle();
-
-              if (!error && userProfile) {
-                profile = userProfile;
-              } else if (supUser.email) {
-                const { data: emailProfile, error: emailProfileError } = await supabase
-                  .from('profiles')
-                  .select('*')
-                  .eq('email', supUser.email)
-                  .maybeSingle();
-
-                if (!emailProfileError && emailProfile) {
-                  profile = emailProfile;
-                }
-              }
+              const profile = await lookupProfileSafely(supUser, supUser.email ?? undefined);
 
               const builtUser = buildAppUserFromProfile(supUser, profile, 'student');
 
@@ -467,35 +606,40 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = async (username: string, password: string, role: Role) => {
     try {
-      const normalizedUsername = username.trim().toLowerCase();
-      const { data: profile, error: profileError } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('username', normalizedUsername)
-        .maybeSingle();
+      const normalizedUsername = normalizeUsername(username);
+      const profile = await lookupProfileSafely(null, normalizedUsername);
+      const candidateEmails = [buildAuthEmail(normalizedUsername)];
 
-      if (profileError || !profile) {
-        return { success: false, error: 'Incorrect username or password.' };
+      if (profile?.email) {
+        candidateEmails.push(profile.email as string);
       }
 
-      if (profile.role !== role) {
-        return { success: false, error: `This account is registered as a ${profile.role}.` };
+      const uniqueEmails = Array.from(new Set(candidateEmails.filter(Boolean)));
+      let signInError: Error | null = null;
+      let sessionUser: { id: string; email?: string | null; user_metadata?: Record<string, unknown> } | null = null;
+
+      for (const email of uniqueEmails) {
+        const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+        if (!error) {
+          sessionUser = data?.user ?? null;
+          break;
+        }
+        signInError = error;
       }
 
-      const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
-        email: profile.email as string,
-        password,
-      });
-
-      if (signInError) return { success: false, error: signInError.message };
-
-      const sessionUser = signInData?.user ?? null;
-      if (sessionUser) {
-        const builtUser = buildAppUserFromProfile(sessionUser, profile, role);
-        setCurrentUser(builtUser);
-        if (builtUser.role === 'teacher') await loadTeacherData(builtUser.id);
-        else await loadStudentData(builtUser);
+      if (!sessionUser) {
+        return { success: false, error: signInError?.message ?? 'Incorrect username or password.' };
       }
+
+      const resolvedRole = (profile?.role as Role) ?? ((sessionUser.user_metadata?.role as Role) ?? role);
+      if (resolvedRole !== role) {
+        return { success: false, error: `This account is registered as a ${resolvedRole}.` };
+      }
+
+      const builtUser = buildAppUserFromProfile(sessionUser, profile, role);
+      setCurrentUser(builtUser);
+      if (builtUser.role === 'teacher') await loadTeacherData(builtUser.id);
+      else await loadStudentData(builtUser);
 
       return { success: true };
     } catch (err) {
@@ -523,16 +667,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       const supUser = signUpData.user;
-      const { data: profileData, error: profileError } = await supabase.from('profiles').insert({
-        user_id: supUser.id,
-        username: username.trim().toLowerCase(),
-        full_name: name.trim(),
-        email,
-        role: 'teacher',
-      }).select().maybeSingle();
+      let profileData: Record<string, unknown> | null = null;
+      try {
+        const { data, error } = await supabase.from('profiles').insert(buildProfileWritePayload({
+          user_id: supUser.id,
+          username: username.trim().toLowerCase(),
+          full_name: name.trim(),
+          email,
+          role: 'teacher',
+        })).select().maybeSingle();
 
-      if (profileError || !profileData) {
-        return { success: false, error: profileError?.message ?? 'Could not create teacher profile.' };
+        if (!error && data) {
+          profileData = data;
+        }
+      } catch (error) {
+        if (isSupabaseAccessError(error)) {
+          localFallbackRef.current = true;
+          enableLocalFallback();
+        }
+        profileData = null;
       }
 
       const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
@@ -648,23 +801,44 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       const supUser = signUpData.user;
-      const { data: profileData, error: profileError } = await supabase.from('profiles').insert({
-        user_id: supUser.id,
-        username: student.username.trim().toLowerCase(),
-        full_name: student.name.trim(),
-        email,
-        role: 'student',
-        class: student.class,
-        guardian_name: student.guardianName,
-        guardian_phone: student.guardianPhone,
-        teacher_id: currentUser.id,
-      }).select().maybeSingle();
+      let profileData: Record<string, unknown> | null = null;
+      try {
+        const { data, error } = await supabase.from('profiles').insert(buildProfileWritePayload({
+          user_id: supUser.id,
+          username: student.username.trim().toLowerCase(),
+          full_name: student.name.trim(),
+          email,
+          role: 'student',
+          class: student.class,
+          guardian_name: student.guardianName,
+          guardian_phone: student.guardianPhone,
+          teacher_id: currentUser.id,
+        })).select().maybeSingle();
 
-      if (profileError || !profileData) {
-        return { success: false, error: profileError?.message ?? 'Could not create student profile.' };
+        if (!error && data) {
+          profileData = data;
+        }
+      } catch (error) {
+        if (isSupabaseAccessError(error)) {
+          localFallbackRef.current = true;
+          enableLocalFallback();
+        }
+        profileData = null;
       }
 
-      const newStudent: User = normalizeUser(profileData);
+      const newStudent: User = profileData ? normalizeUser(profileData) : {
+        id: supUser.id,
+        name: student.name.trim(),
+        role: 'student',
+        username: student.username.trim().toLowerCase(),
+        class: student.class,
+        rollNumber: undefined,
+        guardianName: student.guardianName,
+        guardianPhone: student.guardianPhone,
+        teacherId: currentUser.id,
+      };
+      const nextStudents = [...readLocalJson<User[]>("students", []), newStudent];
+      writeLocalJson("students", nextStudents);
       setStudents((prev) => [...prev, newStudent]);
       return { success: true };
     } catch (err) {
@@ -673,14 +847,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const removeStudent = async (studentId: string) => {
-    const { error } = await supabase.from('profiles').delete().eq('user_id', studentId);
-    if (error) throw error;
-    setStudents((prev) => prev.filter((s) => s.id !== studentId));
+    try {
+      const { error } = await supabase.from('profiles').delete().eq('user_id', studentId);
+      if (error) throw error;
+      const nextStudents = readLocalJson<User[]>("students", []).filter((s) => s.id !== studentId);
+      writeLocalJson("students", nextStudents);
+      setStudents((prev) => prev.filter((s) => s.id !== studentId));
+    } catch (error) {
+      if (isSupabaseAccessError(error)) {
+        localFallbackRef.current = true;
+        enableLocalFallback();
+        const nextStudents = readLocalJson<User[]>("students", []).filter((s) => s.id !== studentId);
+        writeLocalJson("students", nextStudents);
+        setStudents(nextStudents);
+        return;
+      }
+      throw error;
+    }
   };
 
   const updateStudent = async (studentId: string, updates: Partial<User>) => {
     const payload: Record<string, unknown> = {};
-    if (updates.name !== undefined) payload.full_name = updates.name;
+    if (updates.name !== undefined) payload.name = updates.name;
     if (updates.class !== undefined) payload.class = updates.class;
     if (updates.rollNumber !== undefined) payload.roll_number = updates.rollNumber;
     if (updates.guardianName !== undefined) payload.guardian_name = updates.guardianName;
@@ -688,17 +876,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (updates.photoUrl !== undefined) payload.photo_url = updates.photoUrl;
     if (!Object.keys(payload).length) return;
 
-    const { data, error } = await supabase
-      .from('profiles')
-      .update(payload)
-      .eq('user_id', studentId)
-      .select()
-      .single();
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .update(payload)
+        .eq('user_id', studentId)
+        .select()
+        .single();
 
-    if (error || !data) throw error ?? new Error('Failed to update student.');
-    const student = normalizeUser(data);
-    setStudents((prev) => prev.map((s) => s.id === studentId ? student : s));
-    setCurrentUser((prev) => prev?.id === studentId ? student : prev);
+      if (error || !data) throw error ?? new Error('Failed to update student.');
+      const student = normalizeUser(data);
+      const nextStudents = readLocalJson<User[]>("students", []).map((s) => s.id === studentId ? student : s);
+      writeLocalJson("students", nextStudents);
+      setStudents((prev) => prev.map((s) => s.id === studentId ? student : s));
+      setCurrentUser((prev) => prev?.id === studentId ? student : prev);
+    } catch (error) {
+      if (isSupabaseAccessError(error)) {
+        localFallbackRef.current = true;
+        enableLocalFallback();
+        const nextStudents = readLocalJson<User[]>("students", []).map((s) => s.id === studentId ? { ...s, ...updates } : s);
+        writeLocalJson("students", nextStudents);
+        setStudents(nextStudents);
+        setCurrentUser((prev) => prev?.id === studentId ? { ...prev, ...updates } : prev);
+        return;
+      }
+      throw error;
+    }
   };
 
   const addNote = async (note: Omit<Note, 'id' | 'date' | 'hasFile' | 'storagePath'> & { file?: File }) => {
@@ -721,7 +924,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (error || !data) throw error ?? new Error('Note upload failed.');
       setNotes((prev) => [normalizeNote(data), ...prev]);
+      writeLocalJson("notes", [normalizeNote(data), ...readLocalJson<Note[]>("notes", [])]);
     } catch (err) {
+      if (isSupabaseAccessError(err)) {
+        localFallbackRef.current = true;
+        enableLocalFallback();
+        const localNote: Note = {
+          id: createId(),
+          class: note.class,
+          subject: note.subject,
+          chapter: note.chapter,
+          filename: note.filename,
+          description: note.description ?? undefined,
+          date: now(),
+          teacherId: note.teacherId,
+          hasFile: !!note.file,
+          storagePath: undefined,
+        };
+        const nextNotes = [localNote, ...readLocalJson<Note[]>("notes", [])];
+        writeLocalJson("notes", nextNotes);
+        setNotes(nextNotes);
+        return;
+      }
       throw err;
     }
   };
@@ -732,85 +956,139 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const addResult = async (result: Omit<ExamResult, 'id' | 'date'>) => {
-    const { data: insertedResult, error: resultError } = await supabase.from('results').insert({
-      teacher_id: result.teacherId,
-      student_id: result.studentId,
-      subject: result.subject,
-      exam_name: result.examName,
-      marks_obtained: result.marksObtained,
-      total_marks: result.totalMarks,
-      remarks: result.remarks,
-      date: now(),
-    }).select().single();
+    try {
+      const { data: insertedResult, error: resultError } = await supabase.from('results').insert({
+        teacher_id: result.teacherId,
+        student_id: result.studentId,
+        subject: result.subject,
+        exam_name: result.examName,
+        marks_obtained: result.marksObtained,
+        total_marks: result.totalMarks,
+        remarks: result.remarks,
+        date: now(),
+      }).select().single();
 
-    if (resultError || !insertedResult) throw resultError ?? new Error('Failed to add result.');
+      if (resultError || !insertedResult) throw resultError ?? new Error('Failed to add result.');
 
-    const { error: notificationError } = await supabase.from('notifications').insert({
-      student_id: result.studentId,
-      type: 'result',
-      message: `New result published: ${result.examName}`,
-      read: false,
-      date: now(),
-    });
+      const { error: notificationError } = await supabase.from('notifications').insert({
+        student_id: result.studentId,
+        type: 'result',
+        message: `New result published: ${result.examName}`,
+        read: false,
+        date: now(),
+      });
 
-    const { error: activityError } = await supabase.from('activity_log').insert({
-      teacher_id: result.teacherId,
-      type: 'result_published',
-      description: `Published ${result.examName} for ${result.studentId}`,
-      date: now(),
-    });
+      const { error: activityError } = await supabase.from('activity_log').insert({
+        teacher_id: result.teacherId,
+        type: 'result_published',
+        description: `Published ${result.examName} for ${result.studentId}`,
+        date: now(),
+      });
 
-    if (notificationError) throw notificationError;
-    if (activityError) throw activityError;
+      if (notificationError) throw notificationError;
+      if (activityError) throw activityError;
 
-    setResults((prev) => [normalizeResult(insertedResult), ...prev]);
+      const nextResults = [normalizeResult(insertedResult), ...readLocalJson<ExamResult[]>("results", [])];
+      writeLocalJson("results", nextResults);
+      setResults(nextResults);
+    } catch (err) {
+      if (isSupabaseAccessError(err)) {
+        localFallbackRef.current = true;
+        enableLocalFallback();
+        const localResult: ExamResult = {
+          id: createId(),
+          studentId: result.studentId,
+          examName: result.examName,
+          marksObtained: result.marksObtained,
+          totalMarks: result.totalMarks,
+          remarks: result.remarks,
+          date: now(),
+          teacherId: result.teacherId,
+          subject: result.subject,
+        };
+        const nextResults = [localResult, ...readLocalJson<ExamResult[]>("results", [])];
+        const nextNotifications = [{ id: createId(), studentId: result.studentId, type: 'result' as Notification['type'], message: `New result published: ${result.examName}`, read: false, date: now() }, ...readLocalJson<Notification[]>("notifications", [])];
+        const nextActivity = [{ id: createId(), teacherId: result.teacherId, type: 'result_published' as ActivityType, description: `Published ${result.examName} for ${result.studentId}`, date: now() }, ...readLocalJson<ActivityItem[]>("activity_log", [])];
+        writeLocalJson("results", nextResults);
+        writeLocalJson("notifications", nextNotifications);
+        writeLocalJson("activity_log", nextActivity);
+        setResults(nextResults);
+        setNotifications(nextNotifications);
+        setActivityLog(nextActivity);
+        return;
+      }
+      throw err;
+    }
   };
 
   const addAnnouncement = async (ann: Omit<Announcement, 'id' | 'date' | 'timeAgo'>) => {
-    const { data: insertedAnnouncement, error: announcementError } = await supabase.from('announcements').insert({
-      teacher_id: ann.teacherId,
-      title: ann.title,
-      content: ann.content,
-      class_scope: ann.classScope,
-      date: now(),
-    }).select().single();
+    try {
+      const { data: insertedAnnouncement, error: announcementError } = await supabase.from('announcements').insert({
+        teacher_id: ann.teacherId,
+        title: ann.title,
+        content: ann.content,
+        class_scope: ann.classScope,
+        date: now(),
+      }).select().single();
 
-    if (announcementError || !insertedAnnouncement) throw announcementError ?? new Error('Failed to add announcement.');
+      if (announcementError || !insertedAnnouncement) throw announcementError ?? new Error('Failed to add announcement.');
 
-    const { data: studentsData, error: studentsError } = await supabase
-      .from('profiles')
-      .select('user_id, class')
-      .eq('teacher_id', ann.teacherId)
-      .eq('role', 'student');
+      const { data: studentsData, error: studentsError } = await supabase
+        .from('profiles')
+        .select('user_id, class')
+        .eq('teacher_id', ann.teacherId)
+        .eq('role', 'student');
 
-    if (studentsError) throw studentsError;
+      if (studentsError) throw studentsError;
 
-    const targets = (studentsData ?? []).filter((student) =>
-      ann.classScope === 'All Classes' || student.class === ann.classScope,
-    );
-
-    if (targets.length) {
-      const { error: notificationError } = await supabase.from('notifications').insert(
-        targets.map((student) => ({
-          student_id: student.user_id as string,
-          type: 'announcement',
-          message: `New announcement: ${ann.title}`,
-          read: false,
-          date: now(),
-        })),
+      const targets = (studentsData ?? []).filter((student) =>
+        ann.classScope === 'All Classes' || student.class === ann.classScope,
       );
-      if (notificationError) throw notificationError;
+
+      if (targets.length) {
+        const { error: notificationError } = await supabase.from('notifications').insert(
+          targets.map((student) => ({
+            student_id: student.user_id as string,
+            type: 'announcement',
+            message: `New announcement: ${ann.title}`,
+            read: false,
+            date: now(),
+          })),
+        );
+        if (notificationError) throw notificationError;
+      }
+
+      const { error: activityError } = await supabase.from('activity_log').insert({
+        teacher_id: ann.teacherId,
+        type: 'announcement_posted',
+        description: `Posted ${ann.title}`,
+        date: now(),
+      });
+      if (activityError) throw activityError;
+
+      const nextAnnouncements = [normalizeAnnouncement(insertedAnnouncement), ...readLocalJson<Announcement[]>("announcements", [])];
+      writeLocalJson("announcements", nextAnnouncements);
+      setAnnouncements(nextAnnouncements);
+    } catch (err) {
+      if (isSupabaseAccessError(err)) {
+        localFallbackRef.current = true;
+        enableLocalFallback();
+        const localAnnouncement: Announcement = {
+          id: createId(),
+          teacherId: ann.teacherId,
+          title: ann.title,
+          content: ann.content,
+          classScope: ann.classScope,
+          date: now(),
+          timeAgo: '',
+        };
+        const nextAnnouncements = [localAnnouncement, ...readLocalJson<Announcement[]>("announcements", [])];
+        writeLocalJson("announcements", nextAnnouncements);
+        setAnnouncements(nextAnnouncements);
+        return;
+      }
+      throw err;
     }
-
-    const { error: activityError } = await supabase.from('activity_log').insert({
-      teacher_id: ann.teacherId,
-      type: 'announcement_posted',
-      description: `Posted ${ann.title}`,
-      date: now(),
-    });
-    if (activityError) throw activityError;
-
-    setAnnouncements((prev) => [normalizeAnnouncement(insertedAnnouncement), ...prev]);
   };
 
   const removeAnnouncement = async (id: string) => {
@@ -824,80 +1102,110 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const teacherId = currentUser.role === 'teacher' ? currentUser.id : currentUser.teacherId;
     if (!teacherId) throw new Error('Teacher ID missing.');
 
-    const { data: existingConversation } = await supabase
-      .from('conversations')
-      .select('*')
-      .eq('teacher_id', teacherId)
-      .eq('student_id', studentId)
-      .single();
-
-    let conversationId = existingConversation?.id as string | undefined;
-    if (!conversationId) {
-      const { data: newConversation, error: convError } = await supabase
+    try {
+      const { data: existingConversation } = await supabase
         .from('conversations')
-        .insert({ teacher_id: teacherId, student_id: studentId })
-        .select()
+        .select('*')
+        .eq('teacher_id', teacherId)
+        .eq('student_id', studentId)
         .single();
-      if (convError || !newConversation) throw convError ?? new Error('Failed to create conversation.');
-      conversationId = newConversation.id as string;
-    }
 
-    const { error: messageError } = await supabase.from('messages').insert({
-      conversation_id: conversationId,
-      sender_id: senderId,
-      text,
-      created_at: now(),
-    });
-    if (messageError) throw messageError;
-
-    if (currentUser.role === 'teacher') {
-      const { error: notificationError } = await supabase.from('notifications').insert({
-        student_id: studentId,
-        type: 'message',
-        message: 'New message from your teacher',
-        read: false,
-        date: now(),
-      });
-      if (notificationError) throw notificationError;
-
-      const { error: activityError } = await supabase.from('activity_log').insert({
-        teacher_id: teacherId,
-        type: 'message_sent',
-        description: `Sent message to ${studentId}`,
-        date: now(),
-      });
-      if (activityError) throw activityError;
-    }
-
-    const { data: messagesData, error: messagesError } = await supabase
-      .from('messages')
-      .select('*')
-      .eq('conversation_id', conversationId)
-      .order('created_at', { ascending: true });
-
-    if (messagesError || !messagesData) throw messagesError ?? new Error('Failed to load messages.');
-
-    const conversation: Conversation = {
-      studentId,
-      messages: messagesData.map((msg) => ({
-        id: msg.id as string,
-        senderId: msg.sender_id as string,
-        text: msg.text as string,
-        timestamp: msg.created_at
-          ? new Date(msg.created_at as string).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-          : '',
-      })),
-    };
-
-    setConversations((prev) => {
-      const index = prev.findIndex((c) => c.studentId === conversation.studentId);
-      if (index >= 0) {
-        const updated = [...prev];
-        updated[index] = conversation;
-        return updated;
+      let conversationId = existingConversation?.id as string | undefined;
+      if (!conversationId) {
+        const { data: newConversation, error: convError } = await supabase
+          .from('conversations')
+          .insert({ teacher_id: teacherId, student_id: studentId })
+          .select()
+          .single();
+        if (convError || !newConversation) throw convError ?? new Error('Failed to create conversation.');
+        conversationId = newConversation.id as string;
       }
-      return [...prev, conversation];
-    });
+
+      const { error: messageError } = await supabase.from('messages').insert({
+        conversation_id: conversationId,
+        sender_id: senderId,
+        text,
+        created_at: now(),
+      });
+      if (messageError) throw messageError;
+
+      if (currentUser.role === 'teacher') {
+        const { error: notificationError } = await supabase.from('notifications').insert({
+          student_id: studentId,
+          type: 'message',
+          message: 'New message from your teacher',
+          read: false,
+          date: now(),
+        });
+        if (notificationError) throw notificationError;
+
+        const { error: activityError } = await supabase.from('activity_log').insert({
+          teacher_id: teacherId,
+          type: 'message_sent',
+          description: `Sent message to ${studentId}`,
+          date: now(),
+        });
+        if (activityError) throw activityError;
+      }
+
+      const { data: messagesData, error: messagesError } = await supabase
+        .from('messages')
+        .select('*')
+        .eq('conversation_id', conversationId)
+        .order('created_at', { ascending: true });
+
+      if (messagesError || !messagesData) throw messagesError ?? new Error('Failed to load messages.');
+
+      const conversation: Conversation = {
+        studentId,
+        messages: messagesData.map((msg) => ({
+          id: msg.id as string,
+          senderId: msg.sender_id as string,
+          text: msg.text as string,
+          timestamp: msg.created_at
+            ? new Date(msg.created_at as string).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            : '',
+        })),
+      };
+
+      setConversations((prev) => {
+        const index = prev.findIndex((c) => c.studentId === conversation.studentId);
+        if (index >= 0) {
+          const updated = [...prev];
+          updated[index] = conversation;
+          return updated;
+        }
+        return [...prev, conversation];
+      });
+    } catch (error) {
+      if (isSupabaseAccessError(error)) {
+        localFallbackRef.current = true;
+        enableLocalFallback();
+        const existingConversations = readLocalJson<Conversation[]>("conversations", []);
+        const localConversation = existingConversations.find((conversation) => conversation.studentId === studentId) ?? {
+          studentId,
+          messages: [],
+        };
+        const nextConversation: Conversation = {
+          ...localConversation,
+          messages: [
+            ...localConversation.messages,
+            {
+              id: createId(),
+              senderId,
+              text,
+              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            },
+          ],
+        };
+        const nextConversations = existingConversations.filter((conversation) => conversation.studentId !== studentId);
+        nextConversations.push(nextConversation);
+        writeLocalJson("conversations", nextConversations);
+        setConversations(nextConversations);
+        return;
+      }
+      throw error;
+    }
   };
 
   const markNotificationRead = async (notificationId: string) => {
