@@ -84,6 +84,101 @@ const createId = () => typeof crypto !== 'undefined' ? crypto.randomUUID() : `${
 const now = () => new Date().toISOString();
 const buildStoragePath = (filename: string) => `${Date.now()}-${Math.random().toString(36).slice(2)}-${filename}`;
 
+type LocalDemoUser = User & { password: string };
+
+const seedLocalDemoState = () => {
+  const existingUsers = readLocalJson<LocalDemoUser[]>("users", []);
+  if (existingUsers.length) return existingUsers;
+
+  const teacherUser: LocalDemoUser = {
+    id: createId(),
+    name: 'Teacher Demo',
+    role: 'teacher',
+    username: 'teacher',
+    password: 'teacher123',
+  };
+
+  const studentUser: LocalDemoUser = {
+    id: createId(),
+    name: 'Student Demo',
+    role: 'student',
+    username: 'student',
+    password: 'student123',
+    class: '10A',
+    teacherId: teacherUser.id,
+  };
+
+  const users = [teacherUser, studentUser];
+  writeLocalJson("users", users);
+  writeLocalJson("students", [studentUser as User]);
+  writeLocalJson("notes", [{
+    id: createId(),
+    class: '10A',
+    subject: 'Mathematics',
+    chapter: 'Algebra',
+    filename: 'algebra-notes.pdf',
+    description: 'Sample notes for the demo student.',
+    date: now(),
+    teacherId: teacherUser.id,
+    hasFile: false,
+  }]);
+  writeLocalJson("results", [{
+    id: createId(),
+    studentId: studentUser.id,
+    examName: 'Unit Test',
+    marksObtained: 86,
+    totalMarks: 100,
+    remarks: 'Excellent work.',
+    date: now(),
+    teacherId: teacherUser.id,
+    subject: 'Mathematics',
+  }]);
+  writeLocalJson("announcements", [{
+    id: createId(),
+    teacherId: teacherUser.id,
+    title: 'Welcome to TaskMate',
+    content: 'Use this local demo account to explore the teacher and student flow.',
+    classScope: '10A',
+    date: now(),
+    timeAgo: 'Just now',
+  }]);
+  writeLocalJson("notifications", [{
+    id: createId(),
+    studentId: studentUser.id,
+    type: 'announcement',
+    message: 'A new announcement was posted for your class.',
+    read: false,
+    date: now(),
+  }]);
+  writeLocalJson("library", [{
+    id: createId(),
+    teacherId: teacherUser.id,
+    subject: 'Science',
+    chapter: 'Physics',
+    filename: 'physics-reference.pdf',
+    description: 'Saved for reuse.',
+    date: now(),
+  }]);
+  writeLocalJson("activity_log", [{
+    id: createId(),
+    teacherId: teacherUser.id,
+    type: 'student_registered',
+    description: 'Demo student was registered locally.',
+    date: now(),
+  }]);
+  writeLocalJson("conversations", [{
+    studentId: studentUser.id,
+    messages: [{
+      id: createId(),
+      senderId: teacherUser.id,
+      text: 'Welcome! I have shared your first notes.',
+      timestamp: 'Now',
+    }],
+  }]);
+
+  return users;
+};
+
 const readLocalJson = <T,>(key: string, fallback: T): T => {
   if (typeof window === 'undefined') return fallback;
   try {
@@ -106,6 +201,34 @@ const writeLocalJson = (key: string, value: unknown) => {
 const enableLocalFallback = () => {
   if (typeof window === 'undefined') return;
   window.localStorage.setItem(`${LOCAL_STORAGE_PREFIX}:mode`, 'true');
+};
+
+const persistLocalSessionUser = (user: User | null) => {
+  if (typeof window === 'undefined') return;
+  if (!user) {
+    window.localStorage.removeItem(`${LOCAL_STORAGE_PREFIX}:sessionUser`);
+    return;
+  }
+  window.localStorage.setItem(`${LOCAL_STORAGE_PREFIX}:sessionUser`, JSON.stringify(user));
+};
+
+const getLocalSessionUser = () => {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(`${LOCAL_STORAGE_PREFIX}:sessionUser`);
+    return raw ? (JSON.parse(raw) as User) : null;
+  } catch {
+    return null;
+  }
+};
+
+const getLocalFallbackUser = (username: string, password: string, role: Role) => {
+  const users = seedLocalDemoState();
+  const normalizedUsername = normalizeUsername(username);
+  const match = users.find((user) => normalizeUsername(user.username) === normalizedUsername && user.password === password && user.role === role);
+  if (!match) return null;
+  const { password: _password, ...safeUser } = match;
+  return safeUser;
 };
 
 const useLocalFallback = () => {
@@ -296,6 +419,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (typeof window !== 'undefined') {
       window.localStorage.removeItem('taskmate_token');
       window.localStorage.removeItem(`${LOCAL_STORAGE_PREFIX}:mode`);
+      persistLocalSessionUser(null);
     }
   };
 
@@ -543,6 +667,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const { data, error } = await supabase.auth.getSession();
         const session = data?.session ?? null;
         if (!session) {
+          const storedSessionUser = getLocalSessionUser();
+          if (storedSessionUser) {
+            localFallbackRef.current = true;
+            enableLocalFallback();
+            setCurrentUser(storedSessionUser);
+            if (storedSessionUser.role === 'teacher') await loadTeacherData(storedSessionUser.id);
+            else await loadStudentData(storedSessionUser);
+          }
           setLoading(false);
           return;
         }
@@ -611,6 +743,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = async (username: string, password: string, role: Role) => {
     try {
       const normalizedUsername = normalizeUsername(username);
+      const localFallbackUser = getLocalFallbackUser(username, password, role);
+      if (localFallbackUser) {
+        localFallbackRef.current = true;
+        enableLocalFallback();
+        persistLocalSessionUser(localFallbackUser);
+        setCurrentUser(localFallbackUser);
+        if (localFallbackUser.role === 'teacher') await loadTeacherData(localFallbackUser.id);
+        else await loadStudentData(localFallbackUser);
+        return { success: true };
+      }
+
       const profile = await lookupProfileSafely(null, normalizedUsername);
       const candidateEmails = [buildAuthEmail(normalizedUsername)];
 
@@ -641,6 +784,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       const builtUser = buildAppUserFromProfile(sessionUser, profile, role);
+      persistLocalSessionUser(builtUser);
       setCurrentUser(builtUser);
       if (builtUser.role === 'teacher') await loadTeacherData(builtUser.id);
       else await loadStudentData(builtUser);
@@ -667,7 +811,38 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
 
       if (signUpError || !signUpData.user) {
-        return { success: false, error: signUpError?.message ?? 'Could not create account.' };
+        const normalizedUsername = normalizeUsername(username);
+        const existingUsers = readLocalJson<LocalDemoUser[]>("users", []);
+        if (existingUsers.some((user) => normalizeUsername(user.username) === normalizedUsername)) {
+          return { success: false, error: 'Username already taken.' };
+        }
+        const fallbackTeacher: LocalDemoUser = {
+          id: createId(),
+          name: name.trim(),
+          role: 'teacher',
+          username: normalizedUsername,
+          password,
+        };
+        const nextUsers = [...existingUsers, fallbackTeacher];
+        writeLocalJson("users", nextUsers);
+        enableLocalFallback();
+        persistLocalSessionUser(fallbackTeacher);
+        setCurrentUser(fallbackTeacher);
+        writeLocalJson("students", []);
+        writeLocalJson("notes", []);
+        writeLocalJson("results", []);
+        writeLocalJson("announcements", []);
+        writeLocalJson("library", []);
+        writeLocalJson("activity_log", []);
+        writeLocalJson("conversations", []);
+        setStudents([]);
+        setNotes([]);
+        setResults([]);
+        setAnnouncements([]);
+        setLibrary([]);
+        setActivityLog([]);
+        setConversations([]);
+        return { success: true };
       }
 
       const supUser = signUpData.user;
@@ -801,7 +976,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
 
       if (signUpError || !signUpData.user) {
-        return { success: false, error: signUpError?.message ?? 'Could not create student account.' };
+        const normalizedUsername = normalizeUsername(student.username);
+        const existingUsers = readLocalJson<LocalDemoUser[]>("users", []);
+        if (existingUsers.some((user) => normalizeUsername(user.username) === normalizedUsername)) {
+          return { success: false, error: 'Username already taken.' };
+        }
+        const fallbackStudent: LocalDemoUser = {
+          id: createId(),
+          name: student.name.trim(),
+          role: 'student',
+          username: normalizedUsername,
+          password,
+          class: student.class,
+          teacherId: currentUser.id,
+        };
+        const nextUsers = [...existingUsers, fallbackStudent];
+        writeLocalJson("users", nextUsers);
+        const nextStudents = [...readLocalJson<User[]>("students", []), fallbackStudent as User];
+        writeLocalJson("students", nextStudents);
+        enableLocalFallback();
+        persistLocalSessionUser(currentUser);
+        setStudents(nextStudents);
+        return { success: true };
       }
 
       const supUser = signUpData.user;
