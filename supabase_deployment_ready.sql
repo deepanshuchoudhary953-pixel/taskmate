@@ -121,11 +121,33 @@ ALTER TABLE public.activity_log ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS profiles_select_authenticated ON public.profiles;
 CREATE POLICY profiles_select_authenticated ON public.profiles FOR SELECT TO authenticated USING (true);
 DROP POLICY IF EXISTS profiles_insert_authenticated ON public.profiles;
-CREATE POLICY profiles_insert_authenticated ON public.profiles FOR INSERT TO authenticated WITH CHECK (auth.uid() = user_id);
+CREATE POLICY profiles_insert_authenticated ON public.profiles
+FOR INSERT TO authenticated
+WITH CHECK (
+  auth.uid() = user_id
+  OR (role = 'student' AND teacher_id = auth.uid())
+  OR (role = 'teacher' AND auth.uid() = user_id)
+);
+
 DROP POLICY IF EXISTS profiles_update_authenticated ON public.profiles;
-CREATE POLICY profiles_update_authenticated ON public.profiles FOR UPDATE TO authenticated USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
+CREATE POLICY profiles_update_authenticated ON public.profiles
+FOR UPDATE TO authenticated
+USING (
+  auth.uid() = user_id
+  OR (role = 'student' AND teacher_id = auth.uid())
+)
+WITH CHECK (
+  auth.uid() = user_id
+  OR (role = 'student' AND teacher_id = auth.uid())
+);
+
 DROP POLICY IF EXISTS profiles_delete_authenticated ON public.profiles;
-CREATE POLICY profiles_delete_authenticated ON public.profiles FOR DELETE TO authenticated USING (auth.uid() = user_id);
+CREATE POLICY profiles_delete_authenticated ON public.profiles
+FOR DELETE TO authenticated
+USING (
+  auth.uid() = user_id
+  OR (role = 'student' AND teacher_id = auth.uid())
+);
 
 DROP POLICY IF EXISTS notes_select_authenticated ON public.notes;
 CREATE POLICY notes_select_authenticated ON public.notes FOR SELECT TO authenticated USING (true);

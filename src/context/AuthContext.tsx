@@ -217,6 +217,11 @@ const enableLocalFallback = () => {
   window.localStorage.setItem(`${LOCAL_STORAGE_PREFIX}:mode`, 'true');
 };
 
+const disableLocalFallback = () => {
+  if (typeof window === 'undefined') return;
+  window.localStorage.removeItem(`${LOCAL_STORAGE_PREFIX}:mode`);
+};
+
 const persistLocalSessionUser = (user: User | null) => {
   if (typeof window === 'undefined') return;
   if (!user) {
@@ -334,6 +339,49 @@ const lookupProfileSafely = async (supUser: { id: string; email?: string | null 
   }
 
   return null;
+};
+
+const ensureProfileRow = async (
+  userId: string,
+  role: Role,
+  options: {
+    name?: string;
+    username?: string;
+    email?: string | null;
+    teacherId?: string | null;
+    className?: string | null;
+  } = {},
+) => {
+  try {
+    const payload = {
+      p_user_id: userId,
+      p_role: role,
+      p_name: options.name ?? null,
+      p_email: options.email ?? null,
+      p_teacher_id: options.teacherId ?? null,
+      p_class: options.className ?? null,
+      p_username: options.username ? normalizeUsername(options.username) : null,
+    };
+
+    const { error } = await supabase.rpc('ensure_profile_for_user', payload);
+    if (!error) return true;
+
+    const { data, error: fallbackError } = await supabase.from('profiles').upsert({
+      user_id: userId,
+      name: options.name ?? null,
+      full_name: options.name ?? null,
+      username: options.username ? normalizeUsername(options.username) : null,
+      email: options.email ?? null,
+      role,
+      teacher_id: options.teacherId ?? null,
+      class: options.className ?? null,
+    }, { onConflict: 'user_id' }).select().maybeSingle();
+
+    if (fallbackError || !data) return false;
+    return true;
+  } catch {
+    return false;
+  }
 };
 
 const uploadFileToStorage = async (file: File) => {
@@ -625,6 +673,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const linkedLocalStudents = getLocalStudentsForTeacher(teacherId);
       const resolvedStudents = students.length ? students : linkedLocalStudents;
 
+      localFallbackRef.current = false;
+      disableLocalFallback();
       setStudents(resolvedStudents);
       setNotes(notes);
       setResults(results);
@@ -704,6 +754,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const announcements = announcementsResult.status === 'fulfilled' && announcementsResult.value.data ? announcementsResult.value.data.map(normalizeAnnouncement) : [];
       const notifications = notificationsResult.status === 'fulfilled' && notificationsResult.value.data ? notificationsResult.value.data.map(normalizeNotification) : [];
 
+      localFallbackRef.current = false;
+      disableLocalFallback();
       setNotes(notes);
       setResults(results);
       setAnnouncements(announcements);
@@ -751,6 +803,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         try {
           const supUser = session.user;
           const profile = await lookupProfileSafely(supUser, supUser.email ?? undefined);
+          const roleHint = (profile?.role as Role | undefined) ?? ((supUser.user_metadata?.role as Role | undefined) ?? 'student');
+          await ensureProfileRow(supUser.id, roleHint, {
+            name: (profile?.full_name as string | undefined) ?? (profile?.name as string | undefined) ?? (supUser.user_metadata?.full_name as string | undefined) ?? (supUser.user_metadata?.name as string | undefined) ?? supUser.email ?? undefined,
+            username: (profile?.username as string | undefined) ?? (supUser.user_metadata?.username as string | undefined) ?? undefined,
+            email: supUser.email ?? undefined,
+            teacherId: (profile?.teacher_id as string | undefined) ?? null,
+            className: (profile?.class as string | undefined) ?? null,
+          });
+
+          localFallbackRef.current = false;
+          disableLocalFallback();
 
           const storedSessionUser = getLocalSessionUser();
           const fallbackRole = (storedSessionUser?.role as Role | undefined) ?? 'student';
@@ -788,6 +851,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           if (supUser) {
             try {
               const profile = await lookupProfileSafely(supUser, supUser.email ?? undefined);
+              const roleHint = (profile?.role as Role | undefined) ?? ((supUser.user_metadata?.role as Role | undefined) ?? 'student');
+              await ensureProfileRow(supUser.id, roleHint, {
+                name: (profile?.full_name as string | undefined) ?? (profile?.name as string | undefined) ?? (supUser.user_metadata?.full_name as string | undefined) ?? (supUser.user_metadata?.name as string | undefined) ?? supUser.email ?? undefined,
+                username: (profile?.username as string | undefined) ?? (supUser.user_metadata?.username as string | undefined) ?? undefined,
+                email: supUser.email ?? undefined,
+                teacherId: (profile?.teacher_id as string | undefined) ?? null,
+                className: (profile?.class as string | undefined) ?? null,
+              });
+
+              localFallbackRef.current = false;
+              disableLocalFallback();
 
               const storedSessionUser = getLocalSessionUser();
               const fallbackRole = (storedSessionUser?.role as Role | undefined) ?? 'student';
@@ -860,7 +934,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return { success: false, error: `This account is registered as a ${resolvedRole}.` };
       }
 
-      const builtUser = buildAppUserFromProfile(sessionUser, profile, role);
+      await ensureProfileRow(sessionUser.id, resolvedRole, {
+        name: (profile?.full_name as string | undefined) ?? (profile?.name as string | undefined) ?? (sessionUser.user_metadata?.full_name as string | undefined) ?? (sessionUser.user_metadata?.name as string | undefined) ?? sessionUser.email ?? undefined,
+        username: (profile?.username as string | undefined) ?? (sessionUser.user_metadata?.username as string | undefined) ?? normalizedUsername,
+        email: sessionUser.email ?? undefined,
+        teacherId: (profile?.teacher_id as string | undefined) ?? null,
+        className: (profile?.class as string | undefined) ?? null,
+      });
+
+      const repairedProfile = await lookupProfileSafely(sessionUser, sessionUser.email ?? undefined);
+      const builtUser = buildAppUserFromProfile(sessionUser, repairedProfile ?? profile, role);
+      localFallbackRef.current = false;
+      disableLocalFallback();
       persistLocalSessionUser(builtUser);
       setCurrentUser(builtUser);
       if (builtUser.role === 'teacher') await loadTeacherData(builtUser.id);
@@ -968,7 +1053,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       const sessionUser = signInData?.user ?? null;
       if (sessionUser) {
-        const builtUser = buildAppUserFromProfile(sessionUser, profileData, 'teacher');
+        await ensureProfileRow(sessionUser.id, 'teacher', {
+          name: name.trim(),
+          username: username.trim().toLowerCase(),
+          email,
+        });
+        const repairedProfile = await lookupProfileSafely(sessionUser, username.trim().toLowerCase());
+        const builtUser = buildAppUserFromProfile(sessionUser, repairedProfile ?? profileData, 'teacher');
         setCurrentUser(builtUser);
         if (builtUser.role === 'teacher') await loadTeacherData(builtUser.id);
         else await loadStudentData(builtUser);
@@ -1131,7 +1222,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         profileData = null;
       }
 
-      const newStudent: User = profileData ? normalizeUser(profileData) : {
+      const profileRepair = await ensureProfileRow(supUser.id, 'student', {
+        name: student.name.trim(),
+        username: student.username.trim().toLowerCase(),
+        email,
+        teacherId: currentUser.id,
+        className: student.class,
+      });
+      const repairedProfile = profileRepair ? await lookupProfileSafely(supUser, student.username.trim().toLowerCase()) : null;
+      const newStudent: User = (repairedProfile ?? profileData) ? normalizeUser((repairedProfile ?? profileData) as Record<string, unknown>) : {
         id: supUser.id,
         name: student.name.trim(),
         role: 'student',
