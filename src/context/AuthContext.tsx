@@ -80,9 +80,29 @@ const buildAuthEmail = (username: string) => `${normalizeForEmail(username)}@tas
 const STORAGE_BUCKET = import.meta.env.VITE_SUPABASE_STORAGE_BUCKET ?? 'uploads';
 const LOCAL_STORAGE_PREFIX = 'taskmate-local';
 
+const hasSupabaseConfig = () => {
+  const url = import.meta.env.VITE_SUPABASE_URL;
+  const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+  return Boolean(url && anonKey && !/your-project-url|your-anon-key/i.test(url) && !/your-anon-key/i.test(anonKey));
+};
+
 const createId = () => typeof crypto !== 'undefined' ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 const now = () => new Date().toISOString();
 const buildStoragePath = (filename: string) => `${Date.now()}-${Math.random().toString(36).slice(2)}-${filename}`;
+const readFileAsDataUrl = (file: File) => new Promise<string>((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => {
+    if (typeof reader.result === 'string') resolve(reader.result);
+    else reject(new Error('Failed to read file.'));
+  };
+  reader.onerror = () => reject(new Error('Failed to read file.'));
+  reader.readAsDataURL(file);
+});
+const isFallbackableError = (error: unknown) => {
+  if (isSupabaseAccessError(error)) return true;
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return /permission|row level security|relation|does not exist|failed|network|timeout|storage/i.test(message);
+};
 
 type LocalDemoUser = User & { password: string };
 
@@ -200,6 +220,8 @@ const writeLocalJson = (key: string, value: unknown) => {
 
 const enableLocalFallback = () => {
   if (typeof window === 'undefined') return;
+  if (import.meta.env.PROD && hasSupabaseConfig()) return;
+  if (!import.meta.env.DEV && hasSupabaseConfig()) return;
   window.localStorage.setItem(`${LOCAL_STORAGE_PREFIX}:mode`, 'true');
 };
 
@@ -254,6 +276,8 @@ const getLocalTeacherIdForStudent = (studentId: string) => {
 
 const useLocalFallback = () => {
   if (typeof window === 'undefined') return false;
+  if (import.meta.env.PROD && hasSupabaseConfig()) return false;
+  if (!import.meta.env.DEV && hasSupabaseConfig()) return false;
   return window.localStorage.getItem(`${LOCAL_STORAGE_PREFIX}:mode`) === 'true';
 };
 
@@ -323,13 +347,18 @@ const lookupProfileSafely = async (supUser: { id: string; email?: string | null 
 };
 
 const uploadFileToStorage = async (file: File) => {
-  const storagePath = buildStoragePath(file.name);
-  const { error } = await supabase.storage.from(STORAGE_BUCKET).upload(storagePath, file);
-  if (error) throw error;
-  return storagePath;
+  try {
+    const storagePath = buildStoragePath(file.name);
+    const { error } = await supabase.storage.from(STORAGE_BUCKET).upload(storagePath, file);
+    if (error) throw error;
+    return storagePath;
+  } catch {
+    return null;
+  }
 };
 
 const getStorageUrl = async (storagePath: string): Promise<string | null> => {
+  if (/^(data:|blob:|https?:\/\/)/i.test(storagePath)) return storagePath;
   const { data: signedData, error: signedError } = await supabase.storage
     .from(STORAGE_BUCKET)
     .createSignedUrl(storagePath, 60 * 60);
@@ -1190,6 +1219,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       let storagePath: string | null = null;
       if (note.file) {
         storagePath = await uploadFileToStorage(note.file);
+        if (!storagePath) {
+          storagePath = await readFileAsDataUrl(note.file);
+        }
       }
 
       const { data, error } = await supabase.from('notes').insert({
@@ -1204,12 +1236,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }).select().single();
 
       if (error || !data) throw error ?? new Error('Note upload failed.');
-      setNotes((prev) => [normalizeNote(data), ...prev]);
-      writeLocalJson("notes", [normalizeNote(data), ...readLocalJson<Note[]>("notes", [])]);
+      const normalizedNote = normalizeNote(data);
+      setNotes((prev) => [normalizedNote, ...prev]);
+      writeLocalJson("notes", [normalizedNote, ...readLocalJson<Note[]>("notes", [])]);
     } catch (err) {
-      if (isSupabaseAccessError(err)) {
+      if (isFallbackableError(err)) {
         localFallbackRef.current = true;
         enableLocalFallback();
+        let storagePath: string | undefined;
+        if (note.file) {
+          try {
+            storagePath = await readFileAsDataUrl(note.file);
+          } catch {
+            storagePath = undefined;
+          }
+        }
         const localNote: Note = {
           id: createId(),
           class: note.class,
@@ -1219,8 +1260,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           description: note.description ?? undefined,
           date: now(),
           teacherId: note.teacherId,
-          hasFile: !!note.file,
-          storagePath: undefined,
+          hasFile: !!storagePath,
+          storagePath,
         };
         const nextNotes = [localNote, ...readLocalJson<Note[]>("notes", [])];
         writeLocalJson("notes", nextNotes);
@@ -1273,7 +1314,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       writeLocalJson("results", nextResults);
       setResults(nextResults);
     } catch (err) {
-      if (isSupabaseAccessError(err)) {
+      if (isFallbackableError(err)) {
         localFallbackRef.current = true;
         enableLocalFallback();
         const localResult: ExamResult = {
@@ -1351,7 +1392,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       writeLocalJson("announcements", nextAnnouncements);
       setAnnouncements(nextAnnouncements);
     } catch (err) {
-      if (isSupabaseAccessError(err)) {
+      if (isFallbackableError(err)) {
         localFallbackRef.current = true;
         enableLocalFallback();
         const localAnnouncement: Announcement = {
@@ -1459,7 +1500,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return [...prev, conversation];
       });
     } catch (error) {
-      if (isSupabaseAccessError(error)) {
+      if (isFallbackableError(error)) {
         localFallbackRef.current = true;
         enableLocalFallback();
         const existingConversations = readLocalJson<Conversation[]>("conversations", []);

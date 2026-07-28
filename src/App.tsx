@@ -40,7 +40,10 @@ function ProtectedRoute({ component: Component, roleRequired }: { component: Rea
 function PublicRoute({ component: Component }: { component: React.ComponentType }) {
   const { currentUser, loading } = useAuth();
   if (loading) return null;
-  if (currentUser) return <Redirect to={`/${currentUser.role}/dashboard`} />;
+  if (currentUser) {
+    const target = currentUser.role === 'teacher' ? '/teacher/dashboard' : '/student/dashboard';
+    return <Redirect to={target} />;
+  }
   return <Component />;
 }
 
@@ -80,6 +83,8 @@ function AppRouter() {
   if (loading) return <AppLoading />;
   return (
     <>
+      <Route path="/" component={() => <PublicRoute component={LandingPage} />} />
+      <Route path="/login/:role" component={() => <PublicRoute component={LoginPage} />} />
       <KeyboardShortcuts />
       <Switch>
         <Route path="/"           component={() => <PublicRoute component={LandingPage} />} />
