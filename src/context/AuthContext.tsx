@@ -222,13 +222,34 @@ const getLocalSessionUser = () => {
   }
 };
 
+const getLocalUsers = () => {
+  const seedUsers = seedLocalDemoState();
+  const persistedUsers = readLocalJson<LocalDemoUser[]>("users", []);
+  const mergedUsers = [...persistedUsers];
+  for (const seedUser of seedUsers) {
+    const exists = mergedUsers.some((user) => normalizeUsername(user.username) === normalizeUsername(seedUser.username));
+    if (!exists) mergedUsers.push(seedUser);
+  }
+  return mergedUsers;
+};
+
 const getLocalFallbackUser = (username: string, password: string, role: Role) => {
-  const users = seedLocalDemoState();
+  const users = getLocalUsers();
   const normalizedUsername = normalizeUsername(username);
   const match = users.find((user) => normalizeUsername(user.username) === normalizedUsername && user.password === password && user.role === role);
   if (!match) return null;
   const { password: _password, ...safeUser } = match;
   return safeUser;
+};
+
+const getLocalStudentsForTeacher = (teacherId: string) => {
+  const cachedStudents = readLocalJson<User[]>("students", []);
+  return cachedStudents.filter((student) => student.role === 'student' && student.teacherId === teacherId);
+};
+
+const getLocalTeacherIdForStudent = (studentId: string) => {
+  const cachedStudents = readLocalJson<User[]>("students", []);
+  return cachedStudents.find((student) => student.id === studentId)?.teacherId;
 };
 
 const useLocalFallback = () => {
@@ -550,12 +571,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const loadTeacherData = useCallback(async (teacherId: string) => {
     if (localFallbackRef.current || useLocalFallback()) {
       const cachedStudents = readLocalJson<User[]>("students", []);
+      const teacherStudents = getLocalStudentsForTeacher(teacherId);
       const cachedNotes = readLocalJson<Note[]>("notes", []);
       const cachedResults = readLocalJson<ExamResult[]>("results", []);
       const cachedAnnouncements = readLocalJson<Announcement[]>("announcements", []);
       const cachedLibrary = readLocalJson<LibraryNote[]>("library", []);
       const cachedActivity = readLocalJson<ActivityItem[]>("activity_log", []);
-      setStudents(cachedStudents);
+      setStudents(teacherStudents.length ? teacherStudents : cachedStudents);
       setNotes(cachedNotes);
       setResults(cachedResults);
       setAnnouncements(cachedAnnouncements);
@@ -581,8 +603,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const announcements = announcementsResult.status === 'fulfilled' && announcementsResult.value.data ? announcementsResult.value.data.map(normalizeAnnouncement) : [];
       const library = libraryResult.status === 'fulfilled' && libraryResult.value.data ? libraryResult.value.data.map(normalizeLibrary) : [];
       const activityLog = activityResult.status === 'fulfilled' && activityResult.value.data ? activityResult.value.data.map(normalizeActivity) : [];
+      const linkedLocalStudents = getLocalStudentsForTeacher(teacherId);
+      const resolvedStudents = students.length ? students : linkedLocalStudents;
 
-      setStudents(students);
+      setStudents(resolvedStudents);
       setNotes(notes);
       setResults(results);
       setAnnouncements(announcements);
@@ -594,12 +618,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         localFallbackRef.current = true;
         enableLocalFallback();
         const cachedStudents = readLocalJson<User[]>("students", []);
+        const teacherStudents = getLocalStudentsForTeacher(teacherId);
         const cachedNotes = readLocalJson<Note[]>("notes", []);
         const cachedResults = readLocalJson<ExamResult[]>("results", []);
         const cachedAnnouncements = readLocalJson<Announcement[]>("announcements", []);
         const cachedLibrary = readLocalJson<LibraryNote[]>("library", []);
         const cachedActivity = readLocalJson<ActivityItem[]>("activity_log", []);
-        setStudents(cachedStudents);
+        setStudents(teacherStudents.length ? teacherStudents : cachedStudents);
         setNotes(cachedNotes);
         setResults(cachedResults);
         setAnnouncements(cachedAnnouncements);
@@ -875,6 +900,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const supUser = signUpData.user;
       suppressNextAuthSync();
       let profileData: Record<string, unknown> | null = null;
+      const localTeacherUser: LocalDemoUser = {
+        id: supUser.id,
+        name: name.trim(),
+        role: 'teacher',
+        username: username.trim().toLowerCase(),
+        password,
+      };
+      const existingUsers = getLocalUsers();
+      const nextUsers = [...existingUsers.filter((user) => normalizeUsername(user.username) !== normalizeUsername(localTeacherUser.username)), localTeacherUser];
+      writeLocalJson("users", nextUsers);
+      enableLocalFallback();
+      localFallbackRef.current = true;
       try {
         const { data, error } = await supabase.from('profiles').insert(buildProfileWritePayload({
           user_id: supUser.id,
@@ -1031,6 +1068,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const supUser = signUpData.user;
       suppressNextAuthSync();
       let profileData: Record<string, unknown> | null = null;
+      const localStudentUser: LocalDemoUser = {
+        id: supUser.id,
+        name: student.name.trim(),
+        role: 'student',
+        username: student.username.trim().toLowerCase(),
+        password,
+        class: student.class,
+        teacherId: currentUser.id,
+      };
+      const existingUsers = getLocalUsers();
+      const nextUsers = [...existingUsers.filter((user) => normalizeUsername(user.username) !== normalizeUsername(localStudentUser.username)), localStudentUser];
+      writeLocalJson("users", nextUsers);
+      enableLocalFallback();
+      localFallbackRef.current = true;
       try {
         const { data, error } = await supabase.from('profiles').insert(buildProfileWritePayload({
           user_id: supUser.id,
@@ -1329,7 +1380,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const sendMessage = async (studentId: string, senderId: string, text: string) => {
     if (!currentUser) throw new Error('Not logged in.');
-    const teacherId = currentUser.role === 'teacher' ? currentUser.id : currentUser.teacherId;
+    const teacherId = currentUser.role === 'teacher' ? currentUser.id : (currentUser.teacherId ?? getLocalTeacherIdForStudent(currentUser.id));
     if (!teacherId) throw new Error('Teacher ID missing.');
 
     try {
