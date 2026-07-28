@@ -80,12 +80,6 @@ const buildAuthEmail = (username: string) => `${normalizeForEmail(username)}@tas
 const STORAGE_BUCKET = import.meta.env.VITE_SUPABASE_STORAGE_BUCKET ?? 'uploads';
 const LOCAL_STORAGE_PREFIX = 'taskmate-local';
 
-const hasSupabaseConfig = () => {
-  const url = import.meta.env.VITE_SUPABASE_URL;
-  const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-  return Boolean(url && anonKey && !/your-project-url|your-anon-key/i.test(url) && !/your-anon-key/i.test(anonKey));
-};
-
 const createId = () => typeof crypto !== 'undefined' ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 const now = () => new Date().toISOString();
 const buildStoragePath = (filename: string) => `${Date.now()}-${Math.random().toString(36).slice(2)}-${filename}`;
@@ -220,8 +214,6 @@ const writeLocalJson = (key: string, value: unknown) => {
 
 const enableLocalFallback = () => {
   if (typeof window === 'undefined') return;
-  if (import.meta.env.PROD && hasSupabaseConfig()) return;
-  if (!import.meta.env.DEV && hasSupabaseConfig()) return;
   window.localStorage.setItem(`${LOCAL_STORAGE_PREFIX}:mode`, 'true');
 };
 
@@ -276,8 +268,6 @@ const getLocalTeacherIdForStudent = (studentId: string) => {
 
 const useLocalFallback = () => {
   if (typeof window === 'undefined') return false;
-  if (import.meta.env.PROD && hasSupabaseConfig()) return false;
-  if (!import.meta.env.DEV && hasSupabaseConfig()) return false;
   return window.localStorage.getItem(`${LOCAL_STORAGE_PREFIX}:mode`) === 'true';
 };
 
@@ -1215,15 +1205,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const addNote = async (note: Omit<Note, 'id' | 'date' | 'hasFile' | 'storagePath'> & { file?: File }) => {
-    try {
-      let storagePath: string | null = null;
-      if (note.file) {
-        storagePath = await uploadFileToStorage(note.file);
-        if (!storagePath) {
-          storagePath = await readFileAsDataUrl(note.file);
-        }
+    let storagePath: string | null = null;
+    if (note.file) {
+      storagePath = await uploadFileToStorage(note.file);
+      if (!storagePath) {
+        storagePath = await readFileAsDataUrl(note.file);
       }
+    }
 
+    const optimisticNote: Note = {
+      id: createId(),
+      class: note.class,
+      subject: note.subject,
+      chapter: note.chapter,
+      filename: note.filename,
+      description: note.description ?? undefined,
+      date: now(),
+      teacherId: note.teacherId,
+      hasFile: !!storagePath,
+      storagePath: storagePath ?? undefined,
+    };
+
+    const nextNotes = [optimisticNote, ...readLocalJson<Note[]>("notes", [])];
+    writeLocalJson("notes", nextNotes);
+    setNotes(nextNotes);
+
+    try {
       const { data, error } = await supabase.from('notes').insert({
         teacher_id: note.teacherId,
         class: note.class,
@@ -1237,38 +1244,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (error || !data) throw error ?? new Error('Note upload failed.');
       const normalizedNote = normalizeNote(data);
-      setNotes((prev) => [normalizedNote, ...prev]);
-      writeLocalJson("notes", [normalizedNote, ...readLocalJson<Note[]>("notes", [])]);
+      const syncedNotes = [normalizedNote, ...readLocalJson<Note[]>("notes", []).filter((item) => item.id !== optimisticNote.id)];
+      writeLocalJson("notes", syncedNotes);
+      setNotes(syncedNotes);
     } catch (err) {
       if (isFallbackableError(err)) {
         localFallbackRef.current = true;
         enableLocalFallback();
-        let storagePath: string | undefined;
-        if (note.file) {
-          try {
-            storagePath = await readFileAsDataUrl(note.file);
-          } catch {
-            storagePath = undefined;
-          }
-        }
-        const localNote: Note = {
-          id: createId(),
-          class: note.class,
-          subject: note.subject,
-          chapter: note.chapter,
-          filename: note.filename,
-          description: note.description ?? undefined,
-          date: now(),
-          teacherId: note.teacherId,
-          hasFile: !!storagePath,
-          storagePath,
-        };
-        const nextNotes = [localNote, ...readLocalJson<Note[]>("notes", [])];
-        writeLocalJson("notes", nextNotes);
-        setNotes(nextNotes);
-        return;
       }
-      throw err;
     }
   };
 
@@ -1278,6 +1261,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const addResult = async (result: Omit<ExamResult, 'id' | 'date'>) => {
+    const optimisticResult: ExamResult = {
+      id: createId(),
+      studentId: result.studentId,
+      examName: result.examName,
+      marksObtained: result.marksObtained,
+      totalMarks: result.totalMarks,
+      remarks: result.remarks,
+      date: now(),
+      teacherId: result.teacherId,
+      subject: result.subject,
+    };
+
+    const nextResults = [optimisticResult, ...readLocalJson<ExamResult[]>("results", [])];
+    writeLocalJson("results", nextResults);
+    setResults(nextResults);
+
     try {
       const { data: insertedResult, error: resultError } = await supabase.from('results').insert({
         teacher_id: result.teacherId,
@@ -1310,40 +1309,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (notificationError) throw notificationError;
       if (activityError) throw activityError;
 
-      const nextResults = [normalizeResult(insertedResult), ...readLocalJson<ExamResult[]>("results", [])];
-      writeLocalJson("results", nextResults);
-      setResults(nextResults);
+      const syncedResults = [normalizeResult(insertedResult), ...readLocalJson<ExamResult[]>("results", []).filter((item) => item.id !== optimisticResult.id)];
+      writeLocalJson("results", syncedResults);
+      setResults(syncedResults);
     } catch (err) {
       if (isFallbackableError(err)) {
         localFallbackRef.current = true;
         enableLocalFallback();
-        const localResult: ExamResult = {
-          id: createId(),
-          studentId: result.studentId,
-          examName: result.examName,
-          marksObtained: result.marksObtained,
-          totalMarks: result.totalMarks,
-          remarks: result.remarks,
-          date: now(),
-          teacherId: result.teacherId,
-          subject: result.subject,
-        };
-        const nextResults = [localResult, ...readLocalJson<ExamResult[]>("results", [])];
-        const nextNotifications = [{ id: createId(), studentId: result.studentId, type: 'result' as Notification['type'], message: `New result published: ${result.examName}`, read: false, date: now() }, ...readLocalJson<Notification[]>("notifications", [])];
-        const nextActivity = [{ id: createId(), teacherId: result.teacherId, type: 'result_published' as ActivityType, description: `Published ${result.examName} for ${result.studentId}`, date: now() }, ...readLocalJson<ActivityItem[]>("activity_log", [])];
-        writeLocalJson("results", nextResults);
-        writeLocalJson("notifications", nextNotifications);
-        writeLocalJson("activity_log", nextActivity);
-        setResults(nextResults);
-        setNotifications(nextNotifications);
-        setActivityLog(nextActivity);
-        return;
       }
-      throw err;
     }
   };
 
   const addAnnouncement = async (ann: Omit<Announcement, 'id' | 'date' | 'timeAgo'>) => {
+    const optimisticAnnouncement: Announcement = {
+      id: createId(),
+      teacherId: ann.teacherId,
+      title: ann.title,
+      content: ann.content,
+      classScope: ann.classScope,
+      date: now(),
+      timeAgo: '',
+    };
+
+    const nextAnnouncements = [optimisticAnnouncement, ...readLocalJson<Announcement[]>("announcements", [])];
+    writeLocalJson("announcements", nextAnnouncements);
+    setAnnouncements(nextAnnouncements);
+
     try {
       const { data: insertedAnnouncement, error: announcementError } = await supabase.from('announcements').insert({
         teacher_id: ann.teacherId,
@@ -1388,28 +1379,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
       if (activityError) throw activityError;
 
-      const nextAnnouncements = [normalizeAnnouncement(insertedAnnouncement), ...readLocalJson<Announcement[]>("announcements", [])];
-      writeLocalJson("announcements", nextAnnouncements);
-      setAnnouncements(nextAnnouncements);
+      const syncedAnnouncements = [normalizeAnnouncement(insertedAnnouncement), ...readLocalJson<Announcement[]>("announcements", []).filter((item) => item.id !== optimisticAnnouncement.id)];
+      writeLocalJson("announcements", syncedAnnouncements);
+      setAnnouncements(syncedAnnouncements);
     } catch (err) {
       if (isFallbackableError(err)) {
         localFallbackRef.current = true;
         enableLocalFallback();
-        const localAnnouncement: Announcement = {
-          id: createId(),
-          teacherId: ann.teacherId,
-          title: ann.title,
-          content: ann.content,
-          classScope: ann.classScope,
-          date: now(),
-          timeAgo: '',
-        };
-        const nextAnnouncements = [localAnnouncement, ...readLocalJson<Announcement[]>("announcements", [])];
-        writeLocalJson("announcements", nextAnnouncements);
-        setAnnouncements(nextAnnouncements);
-        return;
       }
-      throw err;
     }
   };
 
@@ -1421,7 +1398,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const sendMessage = async (studentId: string, senderId: string, text: string) => {
     if (!currentUser) throw new Error('Not logged in.');
-    const teacherId = currentUser.role === 'teacher' ? currentUser.id : (currentUser.teacherId ?? getLocalTeacherIdForStudent(currentUser.id));
+    let teacherId = currentUser.role === 'teacher' ? currentUser.id : (currentUser.teacherId ?? getLocalTeacherIdForStudent(currentUser.id));
+
+    if (!teacherId && currentUser.role !== 'teacher') {
+      try {
+        const { data } = await supabase.from('profiles').select('teacher_id').eq('user_id', currentUser.id).maybeSingle();
+        teacherId = (data?.teacher_id as string | undefined) ?? undefined;
+      } catch {
+        teacherId = undefined;
+      }
+    }
+
     if (!teacherId) throw new Error('Teacher ID missing.');
 
     try {
@@ -1543,12 +1530,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const addToLibrary = async (note: Omit<LibraryNote, 'id' | 'date'> & { file?: File }) => {
-    try {
-      let storagePath: string | null = null;
-      if (note.file) {
-        storagePath = await uploadFileToStorage(note.file);
-      }
+    let storagePath: string | null = null;
+    if (note.file) {
+      storagePath = await uploadFileToStorage(note.file);
+    }
 
+    const optimisticLibraryItem: LibraryNote = {
+      id: createId(),
+      teacherId: note.teacherId,
+      subject: note.subject,
+      chapter: note.chapter,
+      filename: note.filename,
+      description: note.description ?? undefined,
+      date: now(),
+      storagePath: storagePath ?? undefined,
+    };
+
+    const nextLibrary = [optimisticLibraryItem, ...readLocalJson<LibraryNote[]>("library", [])];
+    writeLocalJson("library", nextLibrary);
+    setLibrary(nextLibrary);
+
+    try {
       const { data, error } = await supabase.from('library').insert({
         teacher_id: note.teacherId,
         subject: note.subject,
@@ -1560,9 +1562,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }).select().single();
 
       if (error || !data) throw error ?? new Error('Failed to add library item.');
-      setLibrary((prev) => [normalizeLibrary(data), ...prev]);
+      const normalizedLibrary = normalizeLibrary(data);
+      const syncedLibrary = [normalizedLibrary, ...readLocalJson<LibraryNote[]>("library", []).filter((item) => item.id !== optimisticLibraryItem.id)];
+      writeLocalJson("library", syncedLibrary);
+      setLibrary(syncedLibrary);
     } catch (err) {
-      throw err;
+      if (isFallbackableError(err)) {
+        localFallbackRef.current = true;
+        enableLocalFallback();
+      }
     }
   };
 

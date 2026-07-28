@@ -251,4 +251,102 @@ AFTER INSERT ON auth.users
 FOR EACH ROW
 EXECUTE FUNCTION public.handle_new_user();
 
+CREATE OR REPLACE FUNCTION public.ensure_profile_for_user(
+  p_user_id uuid,
+  p_role text DEFAULT 'student',
+  p_name text DEFAULT NULL,
+  p_email text DEFAULT NULL,
+  p_teacher_id uuid DEFAULT NULL,
+  p_class text DEFAULT NULL,
+  p_username text DEFAULT NULL
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+  INSERT INTO public.profiles (
+    user_id,
+    name,
+    full_name,
+    email,
+    username,
+    role,
+    teacher_id,
+    class
+  )
+  VALUES (
+    p_user_id,
+    COALESCE(NULLIF(p_name, ''), split_part(COALESCE(p_email, ''), '@', 1), 'User'),
+    COALESCE(NULLIF(p_name, ''), split_part(COALESCE(p_email, ''), '@', 1), 'User'),
+    p_email,
+    COALESCE(NULLIF(p_username, ''), lower(split_part(COALESCE(p_email, ''), '@', 1))),
+    COALESCE(NULLIF(p_role, ''), 'student'),
+    p_teacher_id,
+    p_class
+  )
+  ON CONFLICT (user_id) DO UPDATE
+  SET
+    name = COALESCE(NULLIF(EXCLUDED.name, ''), public.profiles.name),
+    full_name = COALESCE(NULLIF(EXCLUDED.full_name, ''), public.profiles.full_name),
+    email = COALESCE(NULLIF(EXCLUDED.email, ''), public.profiles.email),
+    username = COALESCE(NULLIF(EXCLUDED.username, ''), public.profiles.username),
+    role = COALESCE(NULLIF(EXCLUDED.role, ''), public.profiles.role),
+    teacher_id = COALESCE(EXCLUDED.teacher_id, public.profiles.teacher_id),
+    class = COALESCE(NULLIF(EXCLUDED.class, ''), public.profiles.class);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.send_notification_to_student(
+  p_student_user_id uuid,
+  p_message text,
+  p_type text DEFAULT 'announcement'
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+  PERFORM public.ensure_profile_for_user(
+    p_user_id => p_student_user_id,
+    p_role => 'student'
+  );
+
+  INSERT INTO public.notifications (student_id, type, message, read, date)
+  VALUES (p_student_user_id, p_type, p_message, false, now());
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.notify_linked_students_on_announcement()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  r record;
+BEGIN
+  FOR r IN
+    SELECT user_id
+    FROM public.profiles
+    WHERE role = 'student'
+      AND teacher_id = NEW.teacher_id
+      AND (NEW.class_scope = 'All Classes' OR class = NEW.class_scope)
+  LOOP
+    PERFORM public.send_notification_to_student(
+      p_student_user_id => r.user_id,
+      p_message => 'New announcement: ' || NEW.title,
+      p_type => 'announcement'
+    );
+  END LOOP;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_notify_linked_students_on_announcement ON public.announcements;
+CREATE TRIGGER trg_notify_linked_students_on_announcement
+AFTER INSERT ON public.announcements
+FOR EACH ROW
+EXECUTE FUNCTION public.notify_linked_students_on_announcement();
+
 COMMIT;
