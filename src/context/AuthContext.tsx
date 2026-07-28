@@ -566,7 +566,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     try {
-      const [studentsRes, notesRes, resultsRes, announcementsRes, libraryRes, activityRes] = await Promise.all([
+      const [studentsResult, notesResult, resultsResult, announcementsResult, libraryResult, activityResult] = await Promise.allSettled([
         supabase.from('profiles').select('*').eq('role', 'student').eq('teacher_id', teacherId),
         supabase.from('notes').select('*').eq('teacher_id', teacherId).order('date', { ascending: false }),
         supabase.from('results').select('*').eq('teacher_id', teacherId).order('date', { ascending: false }),
@@ -575,12 +575,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         supabase.from('activity_log').select('*').eq('teacher_id', teacherId).order('date', { ascending: false }).limit(50),
       ]);
 
-      setStudents(studentsRes.data?.map(normalizeUser) ?? []);
-      setNotes(notesRes.data?.map(normalizeNote) ?? []);
-      setResults(resultsRes.data?.map(normalizeResult) ?? []);
-      setAnnouncements(announcementsRes.data?.map(normalizeAnnouncement) ?? []);
-      setLibrary(libraryRes.data?.map(normalizeLibrary) ?? []);
-      setActivityLog(activityRes.data?.map(normalizeActivity) ?? []);
+      const students = studentsResult.status === 'fulfilled' && studentsResult.value.data ? studentsResult.value.data.map(normalizeUser) : [];
+      const notes = notesResult.status === 'fulfilled' && notesResult.value.data ? notesResult.value.data.map(normalizeNote) : [];
+      const results = resultsResult.status === 'fulfilled' && resultsResult.value.data ? resultsResult.value.data.map(normalizeResult) : [];
+      const announcements = announcementsResult.status === 'fulfilled' && announcementsResult.value.data ? announcementsResult.value.data.map(normalizeAnnouncement) : [];
+      const library = libraryResult.status === 'fulfilled' && libraryResult.value.data ? libraryResult.value.data.map(normalizeLibrary) : [];
+      const activityLog = activityResult.status === 'fulfilled' && activityResult.value.data ? activityResult.value.data.map(normalizeActivity) : [];
+
+      setStudents(students);
+      setNotes(notes);
+      setResults(results);
+      setAnnouncements(announcements);
+      setLibrary(library);
+      setActivityLog(activityLog);
       await loadTeacherConversations(teacherId);
     } catch (error) {
       if (isSupabaseAccessError(error)) {
@@ -630,7 +637,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     try {
-      const [notesRes, resultsRes, announcementsRes, notificationsRes] = await Promise.all([
+      const [notesResult, resultsResult, announcementsResult, notificationsResult] = await Promise.allSettled([
         supabase.from('notes').select('*').eq('teacher_id', student.teacherId).eq('class', student.class).order('date', { ascending: false }),
         supabase.from('results').select('*').eq('student_id', student.id).order('date', { ascending: false }),
         supabase
@@ -642,10 +649,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         supabase.from('notifications').select('*').eq('student_id', student.id).order('date', { ascending: false }),
       ]);
 
-      setNotes(notesRes.data?.map(normalizeNote) ?? []);
-      setResults(resultsRes.data?.map(normalizeResult) ?? []);
-      setAnnouncements(announcementsRes.data?.map(normalizeAnnouncement) ?? []);
-      setNotifications(notificationsRes.data?.map(normalizeNotification) ?? []);
+      const notes = notesResult.status === 'fulfilled' && notesResult.value.data ? notesResult.value.data.map(normalizeNote) : [];
+      const results = resultsResult.status === 'fulfilled' && resultsResult.value.data ? resultsResult.value.data.map(normalizeResult) : [];
+      const announcements = announcementsResult.status === 'fulfilled' && announcementsResult.value.data ? announcementsResult.value.data.map(normalizeAnnouncement) : [];
+      const notifications = notificationsResult.status === 'fulfilled' && notificationsResult.value.data ? notificationsResult.value.data.map(normalizeNotification) : [];
+
+      setNotes(notes);
+      setResults(results);
+      setAnnouncements(announcements);
+      setNotifications(notifications);
       await loadStudentConversations(student.id);
     } catch (error) {
       if (isSupabaseAccessError(error)) {
@@ -690,7 +702,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           const supUser = session.user;
           const profile = await lookupProfileSafely(supUser, supUser.email ?? undefined);
 
-          const builtUser = buildAppUserFromProfile(supUser, profile, 'student');
+          const storedSessionUser = getLocalSessionUser();
+          const fallbackRole = (storedSessionUser?.role as Role | undefined) ?? 'student';
+          const builtUser = buildAppUserFromProfile(supUser, profile, fallbackRole);
 
           setCurrentUser(builtUser);
           if (builtUser.role === 'teacher') await loadTeacherData(builtUser.id);
@@ -725,7 +739,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             try {
               const profile = await lookupProfileSafely(supUser, supUser.email ?? undefined);
 
-              const builtUser = buildAppUserFromProfile(supUser, profile, 'student');
+              const storedSessionUser = getLocalSessionUser();
+              const fallbackRole = (storedSessionUser?.role as Role | undefined) ?? 'student';
+              const builtUser = buildAppUserFromProfile(supUser, profile, fallbackRole);
 
               setCurrentUser(builtUser);
 
