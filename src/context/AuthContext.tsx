@@ -671,25 +671,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await loadStudentConversations(student.id);
       return;
     }
-    if (!student.teacherId || !student.class) {
-      setNotes([]);
-      setResults([]);
-      setAnnouncements([]);
-      setNotifications([]);
-      await loadStudentConversations(student.id);
-      return;
-    }
 
     try {
+      let resolvedTeacherId = student.teacherId;
+      let resolvedClass = student.class;
+
+      if (!resolvedTeacherId || !resolvedClass) {
+        const profile = await lookupProfileSafely({ id: student.id, email: student.username ? `${student.username}@taskmate.local` : undefined }, student.username ?? undefined);
+        resolvedTeacherId = (profile?.teacher_id as string | undefined) ?? resolvedTeacherId;
+        resolvedClass = (profile?.class as string | undefined) ?? resolvedClass;
+      }
+
       const [notesResult, resultsResult, announcementsResult, notificationsResult] = await Promise.allSettled([
-        supabase.from('notes').select('*').eq('teacher_id', student.teacherId).eq('class', student.class).order('date', { ascending: false }),
+        (() => {
+          let query = supabase.from('notes').select('*').order('date', { ascending: false });
+          if (resolvedClass) query = query.eq('class', resolvedClass);
+          if (resolvedTeacherId) query = query.eq('teacher_id', resolvedTeacherId);
+          return query;
+        })(),
         supabase.from('results').select('*').eq('student_id', student.id).order('date', { ascending: false }),
-        supabase
-          .from('announcements')
-          .select('*')
-          .eq('teacher_id', student.teacherId)
-          .in('class_scope', ['All Classes', student.class])
-          .order('date', { ascending: false }),
+        (() => {
+          let query = supabase.from('announcements').select('*').order('date', { ascending: false });
+          if (resolvedTeacherId) query = query.eq('teacher_id', resolvedTeacherId);
+          if (resolvedClass) query = query.in('class_scope', ['All Classes', resolvedClass]);
+          return query;
+        })(),
         supabase.from('notifications').select('*').eq('student_id', student.id).order('date', { ascending: false }),
       ]);
 
@@ -1412,12 +1418,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!teacherId) throw new Error('Teacher ID missing.');
 
     try {
-      const { data: existingConversation } = await supabase
+      const { data: existingConversation, error: existingConversationError } = await supabase
         .from('conversations')
         .select('*')
         .eq('teacher_id', teacherId)
         .eq('student_id', studentId)
-        .single();
+        .maybeSingle();
+
+      if (existingConversationError && existingConversationError.code !== 'PGRST116') {
+        throw existingConversationError;
+      }
 
       let conversationId = existingConversation?.id as string | undefined;
       if (!conversationId) {
@@ -1582,7 +1592,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const getLibraryForTeacher = useCallback((teacherId: string) => library.filter((item) => item.teacherId === teacherId), [library]);
   const getStudentsForTeacher = useCallback((teacherId: string) => students.filter((student) => student.teacherId === teacherId), [students]);
-  const getNotesForStudent = useCallback((student: User) => notes.filter((note) => note.class === student.class && note.teacherId === student.teacherId), [notes]);
+  const getNotesForStudent = useCallback((student: User) => notes.filter((note) => note.class === student.class && (!student.teacherId || note.teacherId === student.teacherId || !note.teacherId)), [notes]);
   const getResultsForStudent = useCallback((studentId: string) => results.filter((result) => result.studentId === studentId), [results]);
   const getNotificationsForStudent = useCallback((studentId: string) => [...notifications].filter((notification) => notification.studentId === studentId).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()), [notifications]);
   const getNotificationsUnreadCount = useCallback((studentId: string) => notifications.filter((notification) => notification.studentId === studentId && !notification.read).length, [notifications]);
