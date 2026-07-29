@@ -119,7 +119,10 @@ ALTER TABLE public.library ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.activity_log ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS profiles_select_authenticated ON public.profiles;
-CREATE POLICY profiles_select_authenticated ON public.profiles FOR SELECT TO authenticated USING (true);
+CREATE POLICY profiles_select_authenticated ON public.profiles
+FOR SELECT TO authenticated
+USING (auth.uid() IS NOT NULL);
+
 DROP POLICY IF EXISTS profiles_insert_authenticated ON public.profiles;
 CREATE POLICY profiles_insert_authenticated ON public.profiles
 FOR INSERT TO authenticated
@@ -127,6 +130,7 @@ WITH CHECK (
   auth.uid() = user_id
   OR (role = 'student' AND teacher_id = auth.uid())
   OR (role = 'teacher' AND auth.uid() = user_id)
+  OR auth.uid() IS NOT NULL
 );
 
 DROP POLICY IF EXISTS profiles_update_authenticated ON public.profiles;
@@ -135,10 +139,12 @@ FOR UPDATE TO authenticated
 USING (
   auth.uid() = user_id
   OR (role = 'student' AND teacher_id = auth.uid())
+  OR auth.uid() IS NOT NULL
 )
 WITH CHECK (
   auth.uid() = user_id
   OR (role = 'student' AND teacher_id = auth.uid())
+  OR auth.uid() IS NOT NULL
 );
 
 DROP POLICY IF EXISTS profiles_delete_authenticated ON public.profiles;
@@ -147,166 +153,176 @@ FOR DELETE TO authenticated
 USING (
   auth.uid() = user_id
   OR (role = 'student' AND teacher_id = auth.uid())
+  OR auth.uid() IS NOT NULL
 );
 
 DROP POLICY IF EXISTS notes_select_authenticated ON public.notes;
 CREATE POLICY notes_select_authenticated ON public.notes
 FOR SELECT TO authenticated
-USING (
-  auth.uid() IS NOT NULL
-);
+USING (auth.uid() IS NOT NULL);
+
 DROP POLICY IF EXISTS notes_insert_authenticated ON public.notes;
 CREATE POLICY notes_insert_authenticated ON public.notes
 FOR INSERT TO authenticated
-WITH CHECK (
-  auth.uid() = teacher_id OR auth.uid() IS NOT NULL
-);
+WITH CHECK (auth.uid() IS NOT NULL);
+
 DROP POLICY IF EXISTS notes_update_authenticated ON public.notes;
 CREATE POLICY notes_update_authenticated ON public.notes
 FOR UPDATE TO authenticated
-USING (
-  auth.uid() = teacher_id OR auth.uid() IS NOT NULL
-)
-WITH CHECK (
-  auth.uid() = teacher_id OR auth.uid() IS NOT NULL
-);
+USING (auth.uid() IS NOT NULL)
+WITH CHECK (auth.uid() IS NOT NULL);
+
 DROP POLICY IF EXISTS notes_delete_authenticated ON public.notes;
 CREATE POLICY notes_delete_authenticated ON public.notes
 FOR DELETE TO authenticated
-USING (
-  auth.uid() = teacher_id OR auth.uid() IS NOT NULL
-);
+USING (auth.uid() IS NOT NULL);
 
 DROP POLICY IF EXISTS results_select_authenticated ON public.results;
-CREATE POLICY results_select_authenticated ON public.results FOR SELECT TO authenticated USING (true);
+CREATE POLICY results_select_authenticated ON public.results
+FOR SELECT TO authenticated
+USING (auth.uid() IS NOT NULL);
+
 DROP POLICY IF EXISTS results_insert_authenticated ON public.results;
-CREATE POLICY results_insert_authenticated ON public.results FOR INSERT TO authenticated WITH CHECK (true);
+CREATE POLICY results_insert_authenticated ON public.results
+FOR INSERT TO authenticated
+WITH CHECK (auth.uid() IS NOT NULL);
+
 DROP POLICY IF EXISTS results_update_authenticated ON public.results;
-CREATE POLICY results_update_authenticated ON public.results FOR UPDATE TO authenticated USING (true) WITH CHECK (true);
+CREATE POLICY results_update_authenticated ON public.results
+FOR UPDATE TO authenticated
+USING (auth.uid() IS NOT NULL)
+WITH CHECK (auth.uid() IS NOT NULL);
+
 DROP POLICY IF EXISTS results_delete_authenticated ON public.results;
-CREATE POLICY results_delete_authenticated ON public.results FOR DELETE TO authenticated USING (true);
+CREATE POLICY results_delete_authenticated ON public.results
+FOR DELETE TO authenticated
+USING (auth.uid() IS NOT NULL);
 
 DROP POLICY IF EXISTS announcements_select_authenticated ON public.announcements;
-CREATE POLICY announcements_select_authenticated ON public.announcements FOR SELECT TO authenticated USING (true);
+CREATE POLICY announcements_select_authenticated ON public.announcements
+FOR SELECT TO authenticated
+USING (auth.uid() IS NOT NULL);
+
 DROP POLICY IF EXISTS announcements_insert_authenticated ON public.announcements;
-CREATE POLICY announcements_insert_authenticated ON public.announcements FOR INSERT TO authenticated WITH CHECK (true);
+CREATE POLICY announcements_insert_authenticated ON public.announcements
+FOR INSERT TO authenticated
+WITH CHECK (auth.uid() IS NOT NULL);
+
 DROP POLICY IF EXISTS announcements_update_authenticated ON public.announcements;
-CREATE POLICY announcements_update_authenticated ON public.announcements FOR UPDATE TO authenticated USING (true) WITH CHECK (true);
+CREATE POLICY announcements_update_authenticated ON public.announcements
+FOR UPDATE TO authenticated
+USING (auth.uid() IS NOT NULL)
+WITH CHECK (auth.uid() IS NOT NULL);
+
 DROP POLICY IF EXISTS announcements_delete_authenticated ON public.announcements;
-CREATE POLICY announcements_delete_authenticated ON public.announcements FOR DELETE TO authenticated USING (true);
+CREATE POLICY announcements_delete_authenticated ON public.announcements
+FOR DELETE TO authenticated
+USING (auth.uid() IS NOT NULL);
 
 DROP POLICY IF EXISTS notifications_select_authenticated ON public.notifications;
-CREATE POLICY notifications_select_authenticated ON public.notifications FOR SELECT TO authenticated USING (true);
+CREATE POLICY notifications_select_authenticated ON public.notifications
+FOR SELECT TO authenticated
+USING (auth.uid() IS NOT NULL);
+
 DROP POLICY IF EXISTS notifications_insert_authenticated ON public.notifications;
-CREATE POLICY notifications_insert_authenticated ON public.notifications FOR INSERT TO authenticated WITH CHECK (true);
+CREATE POLICY notifications_insert_authenticated ON public.notifications
+FOR INSERT TO authenticated
+WITH CHECK (auth.uid() IS NOT NULL);
+
 DROP POLICY IF EXISTS notifications_update_authenticated ON public.notifications;
-CREATE POLICY notifications_update_authenticated ON public.notifications FOR UPDATE TO authenticated USING (true) WITH CHECK (true);
+CREATE POLICY notifications_update_authenticated ON public.notifications
+FOR UPDATE TO authenticated
+USING (auth.uid() IS NOT NULL)
+WITH CHECK (auth.uid() IS NOT NULL);
+
 DROP POLICY IF EXISTS notifications_delete_authenticated ON public.notifications;
-CREATE POLICY notifications_delete_authenticated ON public.notifications FOR DELETE TO authenticated USING (true);
+CREATE POLICY notifications_delete_authenticated ON public.notifications
+FOR DELETE TO authenticated
+USING (auth.uid() IS NOT NULL);
 
 DROP POLICY IF EXISTS conversations_select_authenticated ON public.conversations;
 CREATE POLICY conversations_select_authenticated ON public.conversations
 FOR SELECT TO authenticated
-USING (
-  auth.uid() = teacher_id OR auth.uid() = student_id OR auth.uid() IS NOT NULL
-);
+USING (auth.uid() IS NOT NULL);
+
 DROP POLICY IF EXISTS conversations_insert_authenticated ON public.conversations;
 CREATE POLICY conversations_insert_authenticated ON public.conversations
 FOR INSERT TO authenticated
-WITH CHECK (
-  auth.uid() = teacher_id OR auth.uid() = student_id OR auth.uid() IS NOT NULL
-);
+WITH CHECK (auth.uid() IS NOT NULL);
+
 DROP POLICY IF EXISTS conversations_update_authenticated ON public.conversations;
 CREATE POLICY conversations_update_authenticated ON public.conversations
 FOR UPDATE TO authenticated
-USING (
-  auth.uid() = teacher_id OR auth.uid() = student_id OR auth.uid() IS NOT NULL
-)
-WITH CHECK (
-  auth.uid() = teacher_id OR auth.uid() = student_id OR auth.uid() IS NOT NULL
-);
+USING (auth.uid() IS NOT NULL)
+WITH CHECK (auth.uid() IS NOT NULL);
+
 DROP POLICY IF EXISTS conversations_delete_authenticated ON public.conversations;
 CREATE POLICY conversations_delete_authenticated ON public.conversations
 FOR DELETE TO authenticated
-USING (
-  auth.uid() = teacher_id OR auth.uid() = student_id OR auth.uid() IS NOT NULL
-);
+USING (auth.uid() IS NOT NULL);
 
 DROP POLICY IF EXISTS messages_select_authenticated ON public.messages;
 CREATE POLICY messages_select_authenticated ON public.messages
 FOR SELECT TO authenticated
-USING (
-  EXISTS (
-    SELECT 1
-    FROM public.conversations c
-    WHERE c.id = conversation_id
-      AND (c.teacher_id = auth.uid() OR c.student_id = auth.uid())
-  )
-  OR auth.uid() IS NOT NULL
-);
+USING (auth.uid() IS NOT NULL);
+
 DROP POLICY IF EXISTS messages_insert_authenticated ON public.messages;
 CREATE POLICY messages_insert_authenticated ON public.messages
 FOR INSERT TO authenticated
-WITH CHECK (
-  EXISTS (
-    SELECT 1
-    FROM public.conversations c
-    WHERE c.id = conversation_id
-      AND (c.teacher_id = auth.uid() OR c.student_id = auth.uid())
-  )
-  OR auth.uid() IS NOT NULL
-);
+WITH CHECK (auth.uid() IS NOT NULL);
+
 DROP POLICY IF EXISTS messages_update_authenticated ON public.messages;
 CREATE POLICY messages_update_authenticated ON public.messages
 FOR UPDATE TO authenticated
-USING (
-  EXISTS (
-    SELECT 1
-    FROM public.conversations c
-    WHERE c.id = conversation_id
-      AND (c.teacher_id = auth.uid() OR c.student_id = auth.uid())
-  )
-  OR auth.uid() IS NOT NULL
-)
-WITH CHECK (
-  EXISTS (
-    SELECT 1
-    FROM public.conversations c
-    WHERE c.id = conversation_id
-      AND (c.teacher_id = auth.uid() OR c.student_id = auth.uid())
-  )
-  OR auth.uid() IS NOT NULL
-);
+USING (auth.uid() IS NOT NULL)
+WITH CHECK (auth.uid() IS NOT NULL);
+
 DROP POLICY IF EXISTS messages_delete_authenticated ON public.messages;
 CREATE POLICY messages_delete_authenticated ON public.messages
 FOR DELETE TO authenticated
-USING (
-  EXISTS (
-    SELECT 1
-    FROM public.conversations c
-    WHERE c.id = conversation_id
-      AND (c.teacher_id = auth.uid() OR c.student_id = auth.uid())
-  )
-  OR auth.uid() IS NOT NULL
-);
+USING (auth.uid() IS NOT NULL);
 
 DROP POLICY IF EXISTS library_select_authenticated ON public.library;
-CREATE POLICY library_select_authenticated ON public.library FOR SELECT TO authenticated USING (true);
+CREATE POLICY library_select_authenticated ON public.library
+FOR SELECT TO authenticated
+USING (auth.uid() IS NOT NULL);
+
 DROP POLICY IF EXISTS library_insert_authenticated ON public.library;
-CREATE POLICY library_insert_authenticated ON public.library FOR INSERT TO authenticated WITH CHECK (true);
+CREATE POLICY library_insert_authenticated ON public.library
+FOR INSERT TO authenticated
+WITH CHECK (auth.uid() IS NOT NULL);
+
 DROP POLICY IF EXISTS library_update_authenticated ON public.library;
-CREATE POLICY library_update_authenticated ON public.library FOR UPDATE TO authenticated USING (true) WITH CHECK (true);
+CREATE POLICY library_update_authenticated ON public.library
+FOR UPDATE TO authenticated
+USING (auth.uid() IS NOT NULL)
+WITH CHECK (auth.uid() IS NOT NULL);
+
 DROP POLICY IF EXISTS library_delete_authenticated ON public.library;
-CREATE POLICY library_delete_authenticated ON public.library FOR DELETE TO authenticated USING (true);
+CREATE POLICY library_delete_authenticated ON public.library
+FOR DELETE TO authenticated
+USING (auth.uid() IS NOT NULL);
 
 DROP POLICY IF EXISTS activity_log_select_authenticated ON public.activity_log;
-CREATE POLICY activity_log_select_authenticated ON public.activity_log FOR SELECT TO authenticated USING (true);
+CREATE POLICY activity_log_select_authenticated ON public.activity_log
+FOR SELECT TO authenticated
+USING (auth.uid() IS NOT NULL);
+
 DROP POLICY IF EXISTS activity_log_insert_authenticated ON public.activity_log;
-CREATE POLICY activity_log_insert_authenticated ON public.activity_log FOR INSERT TO authenticated WITH CHECK (true);
+CREATE POLICY activity_log_insert_authenticated ON public.activity_log
+FOR INSERT TO authenticated
+WITH CHECK (auth.uid() IS NOT NULL);
+
 DROP POLICY IF EXISTS activity_log_update_authenticated ON public.activity_log;
-CREATE POLICY activity_log_update_authenticated ON public.activity_log FOR UPDATE TO authenticated USING (true) WITH CHECK (true);
+CREATE POLICY activity_log_update_authenticated ON public.activity_log
+FOR UPDATE TO authenticated
+USING (auth.uid() IS NOT NULL)
+WITH CHECK (auth.uid() IS NOT NULL);
+
 DROP POLICY IF EXISTS activity_log_delete_authenticated ON public.activity_log;
-CREATE POLICY activity_log_delete_authenticated ON public.activity_log FOR DELETE TO authenticated USING (true);
+CREATE POLICY activity_log_delete_authenticated ON public.activity_log
+FOR DELETE TO authenticated
+USING (auth.uid() IS NOT NULL);
 
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS trigger
